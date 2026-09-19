@@ -1,0 +1,13 @@
+services:
+  routerguardian:
+    build: .
+    container_name: routerguardian
+    ports:
+      - "8000:8000"
+    volumes:
+      # Model files live on the host, so you can swap in a retrained model
+      # without rebuilding the image.
+      - ./backend/models:/app/backend/models:ro
+      # Seeded topology database + auto-seed CSV persist across restarts.
+      - ./backend/data:/app/backend/data
+    restart: unless-stopped

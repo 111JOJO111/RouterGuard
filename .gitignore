@@ -1,0 +1,25 @@
+# Credentials. backend/.env holds the mail password and the API key.
+.env
+backend/.env
+*.env
+!*.env.example
+
+# Local database — rebuilt on startup from the CSV or the demo generator.
+backend/data/routerguardian.db
+backend/data/routerguardian.db-journal
+backend/data/routerguardian.db-wal
+backend/data/routerguardian.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.docx

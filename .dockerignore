@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.git/
+# Credentials are passed in as environment variables, never baked into an image.
+.env
+backend/.env
+*.ipynb
+*.html
+!frontend/index.html
+.DS_Store

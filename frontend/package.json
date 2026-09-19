@@ -1,0 +1,10 @@
+{
+  "name": "routerguard-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RouterGuardian UI — a single self-contained HTML file. There is NO build step and no dependencies; React and Tailwind load from a CDN. The FastAPI backend serves this file at http://localhost:8000, which is the supported way to run it.",
+  "scripts": {
+    "start": "node -e \"console.log('\\n  There is no frontend server to run.\\n\\n  The backend serves the UI. From the project root:\\n\\n    docker compose up --build\\n\\n  then open http://localhost:8000\\n\\n  (Serving this folder on its own port also works, but the UI\\n   will call the API at http://localhost:8000 — the backend\\n   must be running either way.)\\n')\"",
+    "serve-standalone": "npx http-server -c-1 . -p 3000"
+  }
+}

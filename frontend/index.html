@@ -1,0 +1,1657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>RouterGuardian — Network Operations Intelligence</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path d='M24 3 L41 10 V24 C41 34 33 42 24 45 C15 42 7 34 7 24 V10 Z' fill='%230c1a2e' stroke='%2322d3ee' stroke-width='3'/><circle cx='24' cy='23' r='5' fill='%2322d3ee'/></svg>"/>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  :root{
+    --ink:#03070f; --surface:#08111f; --surface2:#0c1a2e; --edge:#16304d;
+    --cyan:#22d3ee; --teal:#2dd4bf; --sky:#38bdf8; --violet:#a78bfa;
+    --purple:#c084fc; --rose:#f43f5e; --slate:#64748b;
+  }
+  *{scrollbar-width:thin;scrollbar-color:#17324f transparent}
+  body{
+    background:
+      radial-gradient(1000px 520px at 8% -8%, rgba(34,211,238,.12), transparent 62%),
+      radial-gradient(800px 460px at 92% 4%, rgba(167,139,250,.10), transparent 58%),
+      radial-gradient(700px 400px at 50% 105%, rgba(45,212,191,.07), transparent 60%),
+      var(--ink);
+    min-height:100vh;
+  }
+  .grid-bg::before{
+    content:"";position:absolute;inset:0;pointer-events:none;opacity:.35;
+    background-image:linear-gradient(rgba(34,211,238,.05) 1px,transparent 1px),
+                     linear-gradient(90deg,rgba(34,211,238,.05) 1px,transparent 1px);
+    background-size:44px 44px;
+    mask-image:radial-gradient(ellipse at center,#000 35%,transparent 78%);
+  }
+  .glass{background:linear-gradient(165deg,rgba(12,26,46,.92),rgba(8,17,31,.94));
+         border:1px solid rgba(34,211,238,.14);
+         box-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 18px 40px -24px rgba(0,0,0,.9);}
+  .glass:hover{border-color:rgba(34,211,238,.24)}
+  .neon{text-shadow:0 0 18px rgba(34,211,238,.55)}
+  @keyframes ping2{0%{r:10;opacity:.75}100%{r:30;opacity:0}}
+  .ping{animation:ping2 2s cubic-bezier(0,0,.2,1) infinite}
+  @keyframes dashmove{to{stroke-dashoffset:-40}}
+  .flow{stroke-dasharray:2 10;stroke-linecap:round;animation:dashmove 1.4s linear infinite}
+  @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  .rise{animation:rise .3s cubic-bezier(.2,.8,.2,1) both}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .radar{animation:spin 4s linear infinite;transform-origin:center}
+  @keyframes blip{0%,100%{opacity:.25}50%{opacity:1}}
+  .blip{animation:blip 1.6s ease-in-out infinite}
+  .hoverable{transition:filter .12s ease, opacity .12s ease}
+  .hoverable:hover{filter:brightness(1.35)}
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:#17324f;border-radius:6px}
+  ::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body class="text-slate-200 antialiased">
+<div id="root"></div>
+<script type="module">
+import React,{useState,useEffect,useMemo,useCallback,useRef} from "https://esm.sh/react@18.2.0";
+import {createRoot} from "https://esm.sh/react-dom@18.2.0/client";
+const h=React.createElement;
+
+const API=(function(){const l=window.location;
+  if(l.protocol==="file:")return "http://localhost:8000/api";
+  if(l.port&&l.port!=="8000")return "http://localhost:8000/api";
+  return "/api";})();
+const j=async(u,o)=>{const r=await fetch(API+u,o);const d=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);return d;};
+
+// ---------------------------------------------------------------- palette
+// Deliberately no orange anywhere. The risk ramp runs cool -> warm
+// (teal -> sky -> purple -> rose) so severity still reads at a glance.
+const BAND={
+  critical:{c:"#f43f5e",t:"text-rose-300",bg:"bg-rose-500/12",br:"border-rose-500/40",l:"Critical"},
+  elevated:{c:"#c084fc",t:"text-purple-300",bg:"bg-purple-500/12",br:"border-purple-500/40",l:"Elevated"},
+  watch:{c:"#38bdf8",t:"text-sky-300",bg:"bg-sky-500/12",br:"border-sky-500/35",l:"Watch"},
+  normal:{c:"#2dd4bf",t:"text-teal-300",bg:"bg-teal-500/12",br:"border-teal-500/35",l:"Healthy"},
+  unscored:{c:"#475569",t:"text-slate-400",bg:"bg-slate-600/12",br:"border-slate-600/40",l:"Unscored"},
+};
+const band=b=>BAND[b]||BAND.unscored;
+const pc=p=>p==null?"—":(p*100).toFixed(1)+"%";
+
+// Hardware faults need a human; software faults can be scripted. One colour each,
+// used consistently everywhere so the split bar, the table and the fix cards agree.
+const HW_COLOR="#a78bfa", SW_COLOR="#22d3ee";
+const SEVC={Critical:"#f43f5e",Major:"#c084fc",Minor:"#38bdf8",Warning:"#64748b"};
+const HW_TYPES=["equipmentAlarm","environmentalAlarm"];
+
+const TYPE={
+  core_router:{l:"Core router",i:"◆",r:15,c:"#a78bfa"},
+  edge_router:{l:"Edge router",i:"⬢",r:12,c:"#22d3ee"},
+  access_router:{l:"Access router",i:"⬟",r:9.5,c:"#2dd4bf"},
+  switch:{l:"Switch",i:"▭",r:7,c:"#64748b"},
+  endpoint:{l:"End device",i:"•",r:4.5,c:"#334155"},
+};
+
+const fmtDateTime=s=>{try{return new Date(s).toLocaleString(undefined,
+  {day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"});}catch{return String(s);}};
+
+// ------------------------------------------------------------------ atoms
+/**
+ * One shared hover-tooltip mechanism. Every chart and bar in the app uses this,
+ * so hovering anything that shows a number also shows what that number is.
+ */
+function useTip(){
+  const [tip,setTip]=useState(null);
+  const show=(e,content)=>setTip({x:e.clientX,y:e.clientY,content});
+  const hide=()=>setTip(null);
+  const node=tip?h("div",{
+    style:{position:"fixed",zIndex:200,pointerEvents:"none",
+      left:Math.min(tip.x+14,(window.innerWidth||1200)-320),
+      top:Math.min(tip.y+16,(window.innerHeight||800)-160)},
+    className:"glass rounded-lg px-3 py-2 text-[11px] leading-relaxed max-w-[300px] shadow-2xl"},
+    tip.content):null;
+  return {show,hide,node};
+}
+
+function Logo({size=38}){
+  return h("svg",{width:size,height:size,viewBox:"0 0 48 48"},
+    h("defs",null,
+      h("linearGradient",{id:"lgg",x1:"0",y1:"0",x2:"1",y2:"1"},
+        h("stop",{offset:"0%",stopColor:"#22d3ee"}),
+        h("stop",{offset:"55%",stopColor:"#2dd4bf"}),
+        h("stop",{offset:"100%",stopColor:"#a78bfa"}))),
+    h("path",{d:"M24 3 L41 10 V24 C41 34 33 42 24 45 C15 42 7 34 7 24 V10 Z",
+      fill:"url(#lgg)",fillOpacity:".16",stroke:"url(#lgg)",strokeWidth:"2"}),
+    h("circle",{cx:24,cy:23,r:3.6,fill:"#22d3ee"}),
+    [[24,11],[13,29],[35,29]].map((p,i)=>h("g",{key:i},
+      h("line",{x1:24,y1:23,x2:p[0],y2:p[1],stroke:"#2dd4bf",strokeWidth:"1.6",opacity:".85"}),
+      h("circle",{cx:p[0],cy:p[1],r:2.9,fill:"#0c1a2e",stroke:"#2dd4bf",strokeWidth:"1.6"}))));
+}
+function Panel({title,subtitle,right,children,className="",pad="p-5"}){
+  return h("div",{className:`glass rounded-2xl ${pad} transition-colors ${className}`},
+    (title||right)&&h("div",{className:"flex items-start justify-between gap-3"},
+      h("div",{className:"min-w-0"},
+        title&&h("h3",{className:"text-[15px] font-semibold text-white tracking-tight"},title),
+        subtitle&&h("p",{className:"text-xs text-slate-400 mt-1 leading-relaxed max-w-3xl"},subtitle)),
+      right&&h("div",{className:"shrink-0 flex gap-2 flex-wrap justify-end"},right)),
+    h("div",{className:title?"mt-4":""},children));
+}
+function Kpi({label,value,tone="cyan",sub,glyph,hint}){
+  const tip=useTip();
+  const c={cyan:"text-cyan-300",rose:"text-rose-400",purple:"text-purple-300",
+           teal:"text-teal-300",violet:"text-violet-300",sky:"text-sky-300",
+           slate:"text-slate-300"}[tone]||"text-cyan-300";
+  return h("div",{className:"glass rounded-xl px-4 py-3.5 relative overflow-hidden",
+      onMouseMove:hint?(e=>tip.show(e,hint)):undefined,onMouseLeave:tip.hide},
+    tip.node,
+    h("div",{className:"flex items-center gap-2"},
+      glyph&&h("span",{className:"text-sm opacity-70"},glyph),
+      h("div",{className:`text-[26px] leading-none font-bold ${c}`},value)),
+    h("div",{className:"text-[10px] uppercase tracking-[.14em] text-slate-500 mt-1.5"},label),
+    sub&&h("div",{className:"text-[10px] text-slate-500 mt-0.5"},sub));
+}
+function Btn({children,onClick,variant="primary",disabled,size="md",title}){
+  const v={primary:"bg-gradient-to-r from-cyan-500 to-teal-500 text-slate-900 font-semibold hover:brightness-110",
+    ghost:"bg-white/[.03] hover:bg-white/[.07] text-slate-200 border border-cyan-500/20",
+    danger:"bg-rose-500/90 hover:bg-rose-500 text-white"}[variant];
+  const s=size==="sm"?"px-3 py-1.5 text-xs":"px-4 py-2.5 text-sm";
+  return h("button",{onClick,disabled,title,
+    className:`${v} ${s} rounded-lg disabled:opacity-40 disabled:cursor-not-allowed transition-all active:scale-[.98]`},children);
+}
+function Err({msg}){return msg?h("div",{className:"text-sm text-rose-200 bg-rose-500/10 rounded-xl p-3.5 border border-rose-500/30 rise"},msg):null;}
+function Note({children,tone="cyan"}){
+  const t={cyan:"text-cyan-100/90 bg-cyan-500/[.07] border-cyan-500/25",
+           violet:"text-violet-100/90 bg-violet-500/[.07] border-violet-500/25",
+           rose:"text-rose-100/90 bg-rose-500/[.07] border-rose-500/25"}[tone];
+  return h("div",{className:`text-xs ${t} border rounded-xl p-3 leading-relaxed`},children);
+}
+function Loading({label="Loading"}){
+  return h("div",{className:"flex flex-col items-center justify-center py-16 gap-4"},
+    h("svg",{width:54,height:54,viewBox:"0 0 54 54"},
+      h("circle",{cx:27,cy:27,r:22,fill:"none",stroke:"#16304d",strokeWidth:2}),
+      h("circle",{cx:27,cy:27,r:14,fill:"none",stroke:"#16304d",strokeWidth:1.5}),
+      h("line",{x1:27,y1:27,x2:27,y2:5,stroke:"#22d3ee",strokeWidth:2,className:"radar"}),
+      h("circle",{cx:27,cy:27,r:2.5,fill:"#22d3ee"})),
+    h("div",{className:"text-sm text-slate-400"},label,h("span",{className:"blip"},"…")));
+}
+function Empty({title,body,action}){
+  return h("div",{className:"flex flex-col items-center justify-center py-16 text-center gap-3"},
+    h(Logo,{size:44}),
+    h("div",{className:"text-base font-semibold text-slate-200 mt-1"},title),
+    body&&h("p",{className:"text-sm text-slate-400 max-w-md leading-relaxed"},body),
+    action&&h("div",{className:"mt-2"},action));
+}
+function Dial({p,threshold,size=150}){
+  const R=52,C=2*Math.PI*R;
+  const col=p==null?"#475569":p>=threshold?BAND.critical.c:p>=.4?BAND.elevated.c:p>=.15?BAND.watch.c:BAND.normal.c;
+  return h("div",{className:"relative shrink-0",style:{width:size,height:size}},
+    h("svg",{viewBox:"0 0 140 140",className:"w-full h-full -rotate-90"},
+      h("circle",{cx:70,cy:70,r:R,fill:"none",stroke:"#12263f",strokeWidth:11}),
+      p!=null&&h("circle",{cx:70,cy:70,r:R,fill:"none",stroke:col,strokeWidth:11,strokeLinecap:"round",
+        strokeDasharray:C,strokeDashoffset:C*(1-Math.min(p,1)),
+        style:{transition:"stroke-dashoffset .7s cubic-bezier(.2,.8,.2,1)",
+               filter:`drop-shadow(0 0 8px ${col}88)`}})),
+    h("div",{className:"absolute inset-0 flex flex-col items-center justify-center"},
+      h("div",{className:"text-[30px] font-bold leading-none",style:{color:col}},p==null?"—":Math.round(p*100)+"%"),
+      h("div",{className:"text-[9px] uppercase tracking-[.18em] text-slate-500 mt-1"},"fault risk")));
+}
+
+/** Hardware / software chip. Replaces the old wrench and cog emoji. */
+function Kind({hw,size="sm"}){
+  const s=size==="sm"?"text-[9px] px-1.5 py-0.5":"text-[10px] px-2 py-0.5";
+  return h("span",{className:`${s} rounded font-semibold uppercase tracking-wider border`,
+    style:{color:hw?HW_COLOR:SW_COLOR,borderColor:(hw?HW_COLOR:SW_COLOR)+"66",
+           background:(hw?HW_COLOR:SW_COLOR)+"18"}},hw?"hardware":"software");
+}
+
+function Verdict({r,horizon=12}){
+  if(!r)return null;
+  if(!r.scored)return h("div",{className:"rounded-xl p-3.5 border border-slate-600/40 bg-slate-600/10 text-sm text-slate-400"},r.action_detail);
+  const hw=r.fault_type==="hardware";
+  const cls=r.fault_predicted?(hw?"bg-violet-500/10 border-violet-500/40":"bg-cyan-500/10 border-cyan-500/40")
+                             :"bg-teal-500/10 border-teal-500/35";
+  return h("div",{className:`rounded-xl p-3.5 border ${cls} rise`},
+    h("div",{className:"font-semibold text-white flex items-center gap-2 text-sm flex-wrap"},
+      r.fault_predicted
+        ? h(React.Fragment,null,h(Kind,{hw,size:"md"}),
+            hw?"Fault predicted — alert the team":"Fault predicted — auto-remediate")
+        : h(React.Fragment,null,h("span",{className:"text-teal-300"},"✓"),"No fault predicted")),
+    h("div",{className:"text-xs text-slate-300 mt-1.5 leading-relaxed"},r.action_detail),
+    h("div",{className:"text-[10px] text-slate-500 mt-1.5 leading-relaxed"},
+      `Horizon: ${horizon} hours. This is exactly the window the model was trained on — `+
+      `24 hours of alarms in, ${horizon} hours ahead out. It is not a display setting; changing it `+
+      "would mean retraining."),
+    r.type_confidence!=null&&h("div",{className:"text-[11px] text-slate-500 mt-2"},
+      `Stage 2 confidence ${(r.type_confidence*100).toFixed(1)}%`));
+}
+
+// --------------------------------------------------------------- explanation
+// Plain-language strength bands for a TreeSHAP log-odds contribution.
+const STRENGTH=[
+  {min:1.0,label:"very strong",blurb:"moved the odds by more than 2.7x"},
+  {min:0.5,label:"strong",blurb:"moved the odds by roughly 1.6x to 2.7x"},
+  {min:0.2,label:"moderate",blurb:"moved the odds by roughly 1.2x to 1.6x"},
+  {min:0,   label:"slight",blurb:"nudged the odds by less than 1.2x"},
+];
+const strengthOf=v=>{const a=Math.abs(v);return STRENGTH.find(s=>a>=s.min)||STRENGTH[3];};
+
+function Explain({ex}){
+  const tip=useTip();
+  const [legend,setLegend]=useState(false);
+  if(!ex)return null;
+  const cs=ex.contributions.filter(c=>Math.abs(c.contribution)>0.001);
+  if(!cs.length)return null;
+  const max=Math.max(...cs.map(c=>Math.abs(c.contribution)),1e-4);
+  const up=cs.filter(c=>c.contribution>0), down=cs.filter(c=>c.contribution<0);
+  const sentence=()=>{
+    const top=cs[0];
+    const dir=top.contribution>0?"raising":"lowering";
+    const others=cs.slice(1,3).map(c=>c.label.toLowerCase()).join(" and ");
+    return `Mostly driven by ${top.label.toLowerCase()} (${strengthOf(top.contribution).label}, ${dir} the risk)`+
+           (others?`, then ${others}.`:".");
+  };
+  return h("div",null,tip.node,
+    h("div",{className:"flex items-baseline justify-between gap-2 mb-1"},
+      h("div",{className:"text-sm font-semibold text-white"},"Why this score"),
+      h("button",{onClick:()=>setLegend(v=>!v),
+        className:"text-[10px] text-cyan-400 hover:text-cyan-300"},
+        legend?"hide scale":"what do these words mean?")),
+    h("p",{className:"text-[12px] text-slate-300 leading-relaxed mb-1"},sentence()),
+    h("p",{className:"text-[11px] text-slate-500 mb-3"},
+      `${up.length} factor${up.length===1?"":"s"} pushing toward a fault, `+
+      `${down.length} pushing away. Bar length = how much each one moved the score.`),
+    legend&&h("div",{className:"mb-3 rounded-xl border border-cyan-500/20 bg-cyan-500/[.05] p-3 space-y-2"},
+      h("p",{className:"text-[11px] text-cyan-100/90 leading-relaxed"},
+        h("strong",null,"Yes, these are the model's own numbers. "),
+        "Every row below is one of the 26 features the model was actually trained on, and the bar is that "+
+        "feature's exact TreeSHAP contribution for this router. The words are just a readable label for how "+
+        "big that contribution is:"),
+      h("div",{className:"space-y-1"},STRENGTH.map(s=>
+        h("div",{key:s.label,className:"flex gap-2 text-[11px]"},
+          h("span",{className:"w-24 shrink-0 text-white font-medium"},s.label),
+          h("span",{className:"text-slate-400"},
+            s.min>0?`|contribution| ≥ ${s.min.toFixed(1)} log-odds — ${s.blurb}`
+                   :`|contribution| < 0.2 log-odds — ${s.blurb}`)))),
+      h("p",{className:"text-[10px] text-slate-500 leading-relaxed"},
+        "An arrow up means the feature pushed this router toward a predicted fault; down means it pushed away. "+
+        "The bands are cut-offs on the log-odds scale, so they are relative to the fleet average, not absolute risk.")),
+    h("div",{className:"space-y-1.5"},cs.slice(0,8).map((c,i)=>{
+      const pos=c.contribution>0,w=Math.max(Math.abs(c.contribution)/max*100,4);
+      const st=strengthOf(c.contribution);
+      const hint=h("div",null,
+        h("div",{className:"font-semibold text-white mb-1"},c.label),
+        h("div",{className:"text-slate-300"},
+          `Value for this router: ${Number.isInteger(c.value)?c.value:c.value.toFixed(2)}`),
+        h("div",{className:"text-slate-300"},
+          `Contribution: ${c.contribution>0?"+":""}${c.contribution.toFixed(3)} log-odds `+
+          `(${st.label}, ${pos?"toward":"away from"} a fault)`),
+        h("div",{className:"text-slate-500 mt-1"},st.blurb+" versus the fleet average."));
+      return h("div",{key:i,className:"flex items-center gap-2 text-[11px] hoverable",
+          onMouseMove:e=>tip.show(e,hint),onMouseLeave:tip.hide},
+        h("div",{className:"w-40 truncate text-slate-300"},c.label),
+        h("div",{className:"w-10 text-right font-mono text-slate-500"},
+          Number.isInteger(c.value)?c.value:c.value.toFixed(1)),
+        h("div",{className:"flex-1 h-4 bg-slate-800/50 rounded overflow-hidden flex "+(pos?"justify-start":"justify-end")},
+          h("div",{className:"h-full rounded",
+            style:{width:w+"%",background:pos?BAND.critical.c+"bf":BAND.normal.c+"bf"}})),
+        h("div",{className:"w-24 text-right",style:{color:pos?BAND.critical.c:BAND.normal.c}},
+          (pos?"↑ ":"↓ ")+st.label));
+    })),
+    h("p",{className:"text-[10px] text-slate-600 mt-2.5 leading-relaxed"},
+      "Technically these are TreeSHAP values in log-odds: how far each feature moved this router's score away from the fleet average. Hover any row for the exact number."));
+}
+
+// ------------------------------------------------------ topology views
+function useRisk(fleet){
+  return useMemo(()=>{const m={};(fleet?.devices||[]).forEach(d=>m[d.device_id]=d);return m;},[fleet]);
+}
+function inherited(dev,byId,risk){
+  let cur=dev,guard=0;
+  while(cur&&guard++<8){ if(risk[cur.device_id])return risk[cur.device_id];
+    cur=cur.parent_id?byId[cur.parent_id]:null; }
+  return null;
+}
+
+function MapView({topo,fleet,onSelect}){
+  const risk=useRisk(fleet);
+  const tip=useTip();
+  const byId=useMemo(()=>Object.fromEntries((topo?.devices||[]).map(d=>[d.device_id,d])),[topo]);
+  if(!topo?.sites?.length)return null;
+  const W=1000,H=520,P=70;
+  const lats=topo.sites.map(s=>s.lat),lons=topo.sites.map(s=>s.lon);
+  const la0=Math.min(...lats),la1=Math.max(...lats),lo0=Math.min(...lons),lo1=Math.max(...lons);
+  const X=lo=>P+((lo-lo0)/((lo1-lo0)||1))*(W-2*P);
+  const Y=la=>H-P-((la-la0)/((la1-la0)||1))*(H-2*P);
+  const sitePos={}; topo.sites.forEach(s=>sitePos[s.name]={x:X(s.lon),y:Y(s.lat),s});
+
+  const siteRisk={};
+  topo.sites.forEach(s=>{
+    const rs=s.device_ids.map(id=>risk[id]).filter(Boolean);
+    const worst=rs.reduce((a,b)=>(b.fault_probability||0)>(a?.fault_probability||0)?b:a,null);
+    siteRisk[s.name]={worst,atRisk:rs.filter(r=>r.fault_predicted).length,n:rs.length};
+  });
+  const siteLinks=[];
+  (topo.links||[]).forEach(l=>{
+    const a=byId[l.source],b=byId[l.target];
+    if(!a||!b||!a.site||!b.site||a.site===b.site)return;
+    const k=[a.site,b.site].sort().join("|");
+    if(!siteLinks.find(x=>x.k===k))siteLinks.push({k,a:a.site,b:b.site,
+      hot:(risk[l.target]?.fault_predicted)||(risk[l.source]?.fault_predicted)});
+  });
+
+  return h("div",{className:"relative grid-bg rounded-xl overflow-hidden bg-[#050d18]"},
+    tip.node,
+    h("svg",{viewBox:`0 0 ${W} ${H}`,className:"w-full relative",style:{minWidth:700}},
+      h("defs",null,
+        h("radialGradient",{id:"sg"},
+          h("stop",{offset:"0%",stopColor:"#22d3ee",stopOpacity:".30"}),
+          h("stop",{offset:"100%",stopColor:"#22d3ee",stopOpacity:"0"}))),
+      siteLinks.map((l,i)=>{
+        const a=sitePos[l.a],b=sitePos[l.b]; if(!a||!b)return null;
+        const mx=(a.x+b.x)/2,my=(a.y+b.y)/2-Math.abs(a.x-b.x)*0.12;
+        return h("path",{key:i,d:`M${a.x},${a.y} Q${mx},${my} ${b.x},${b.y}`,fill:"none",
+          stroke:l.hot?BAND.critical.c:"#164e63",strokeWidth:l.hot?1.8:1,
+          opacity:l.hot?.85:.5,className:l.hot?"flow":""});
+      }),
+      topo.sites.map(s=>{
+        const p=sitePos[s.name],sr=siteRisk[s.name],w=sr.worst;
+        const b=band(w?.risk_band||"unscored");
+        const rad=8+Math.min(s.n_devices,26)*0.42;
+        const hint=h("div",null,
+          h("div",{className:"font-semibold text-white mb-1"},s.name),
+          h("div",{className:"text-slate-300"},`${s.n_routers} routers · ${s.n_devices} devices`),
+          w&&h("div",{className:"text-slate-300"},
+            `Worst router: ${w.device_id} at ${pc(w.fault_probability)}`),
+          h("div",{className:"text-slate-400 mt-1"},
+            sr.atRisk>0?`${sr.atRisk} router${sr.atRisk===1?"":"s"} above the alert threshold`
+                       :"No router here is above the alert threshold"));
+        return h("g",{key:s.name,transform:`translate(${p.x},${p.y})`,style:{cursor:"pointer"},
+          onClick:()=>w&&onSelect(w.device_id),
+          onMouseMove:e=>tip.show(e,hint),onMouseLeave:tip.hide},
+          h("circle",{r:rad*2.4,fill:"url(#sg)"}),
+          sr.atRisk>0&&h("circle",{r:rad,fill:"none",stroke:BAND.critical.c,strokeWidth:1.6,className:"ping"}),
+          h("circle",{r:rad,fill:b.c,fillOpacity:".22",stroke:b.c,strokeWidth:2,
+            style:{filter:sr.atRisk>0?`drop-shadow(0 0 9px ${BAND.critical.c}cc)`:`drop-shadow(0 0 6px ${b.c}66)`}}),
+          h("text",{textAnchor:"middle",y:4,style:{fontSize:11,fontWeight:700,fill:"#e2e8f0"}},s.n_routers),
+          h("text",{textAnchor:"middle",y:rad+15,style:{fontSize:10,fill:"#94a3b8"}},s.name),
+          sr.atRisk>0&&h("text",{textAnchor:"middle",y:rad+27,style:{fontSize:9,fill:BAND.critical.c}},
+            `${sr.atRisk} at risk`));
+      })));
+}
+
+function TreeView({topo,fleet,onSelect,selected,showEndpoints}){
+  const risk=useRisk(fleet);
+  const tip=useTip();
+  const byId=useMemo(()=>Object.fromEntries((topo?.devices||[]).map(d=>[d.device_id,d])),[topo]);
+  const layout=useMemo(()=>{
+    if(!topo)return null;
+    const ORD=["core_router","edge_router","access_router","switch","endpoint"];
+    const rows=showEndpoints?ORD:ORD.slice(0,4);
+    const Y={core_router:70,edge_router:190,access_router:310,switch:415,endpoint:495};
+    const groups={}; rows.forEach(t=>groups[t]=[]);
+    topo.devices.forEach(d=>{ if(groups[d.device_type])groups[d.device_type].push(d); });
+    const W=Math.max(1000,(groups.endpoint?.length||groups.switch?.length||20)*13);
+    const pos={};
+    rows.forEach(t=>{const L=groups[t]||[];L.forEach((d,i)=>{pos[d.device_id]={x:(W/(L.length+1))*(i+1),y:Y[t],d};});});
+    return {pos,W,H:showEndpoints?560:470,groups,rows};
+  },[topo,showEndpoints]);
+  if(!layout)return null;
+  const {pos,W,H,rows}=layout;
+  const LBL={core_router:"CORE",edge_router:"EDGE",access_router:"ACCESS",switch:"SWITCHES",endpoint:"END DEVICES"};
+
+  return h("div",{className:"relative overflow-x-auto rounded-xl bg-[#050d18] grid-bg"},
+    tip.node,
+    h("svg",{viewBox:`0 0 ${W} ${H}`,className:"w-full",style:{minWidth:780}},
+      rows.map(t=>{const any=Object.values(pos).find(p=>p.d.device_type===t);
+        return any&&h("text",{key:t,x:6,y:any.y-26,style:{fontSize:9,fill:"#334d6e",letterSpacing:2}},LBL[t]);}),
+      (topo.links||[]).map((l,i)=>{
+        const s=pos[l.source],t=pos[l.target]; if(!s||!t)return null;
+        const hot=risk[l.target]?.fault_predicted||risk[l.source]?.fault_predicted;
+        return h("path",{key:i,d:`M${s.x},${s.y} C${s.x},${(s.y+t.y)/2} ${t.x},${(s.y+t.y)/2} ${t.x},${t.y}`,
+          fill:"none",stroke:hot?BAND.critical.c:"#12314f",
+          strokeWidth:hot?1.8:1,opacity:hot?.9:.45,className:hot?"flow":""});
+      }),
+      Object.values(pos).map(({x,y,d})=>{
+        const own=risk[d.device_id];
+        const eff=own||inherited(d,byId,risk);
+        const b=band(own?own.risk_band:(eff?.fault_predicted?"critical":"unscored"));
+        const T=TYPE[d.device_type]||TYPE.endpoint;
+        const sel=selected===d.device_id;
+        const isEp=d.device_type==="endpoint",isSw=d.device_type==="switch";
+        const col=own?b.c:(isEp||isSw?(eff?.fault_predicted?"#7f1d1d":T.c):b.c);
+        const hint=h("div",null,
+          h("div",{className:"font-semibold text-white mb-1"},d.device_id),
+          h("div",{className:"text-slate-300"},`${T.l}${d.model?" · "+d.model:""}`),
+          d.site&&h("div",{className:"text-slate-400"},d.site),
+          own?h("div",{className:"mt-1 text-slate-300"},
+                `Risk ${pc(own.fault_probability)} · ${band(own.risk_band).l}`)
+             :h("div",{className:"mt-1 text-slate-500"},
+                "Passive device — carries no alarms of its own. Its status follows the router upstream."));
+        return h("g",{key:d.device_id,transform:`translate(${x},${y})`,
+          style:{cursor:own?"pointer":"default"},onClick:()=>own&&onSelect(d.device_id),
+          onMouseMove:e=>tip.show(e,hint),onMouseLeave:tip.hide},
+          own?.fault_predicted&&h("circle",{r:T.r,fill:"none",stroke:BAND.critical.c,strokeWidth:1.6,className:"ping"}),
+          sel&&h("circle",{r:T.r+6,fill:"none",stroke:"#22d3ee",strokeWidth:2}),
+          isEp?h("circle",{r:T.r,fill:col,fillOpacity:.75})
+              :h("circle",{r:T.r,fill:col,fillOpacity:.2,stroke:col,strokeWidth:1.9,
+                 style:{filter:own?.fault_predicted?`drop-shadow(0 0 8px ${BAND.critical.c}aa)`:"none"}}),
+          !isEp&&!isSw&&h("text",{y:T.r+12,textAnchor:"middle",
+            style:{fontSize:8.5,fill:"#7c93ad"}},d.device_id),
+          own&&own.fault_probability!=null&&h("text",{y:T.r+22,textAnchor:"middle",
+            style:{fontSize:8,fill:b.c}},pc(own.fault_probability)));
+      })));
+}
+
+// ------------------------------------------------------------ OVERVIEW
+function Overview({topo,fleet,loading,onSelect,reload,modelsLoaded}){
+  const [view,setView]=useState("map");
+  const [eps,setEps]=useState(false);
+  if(loading)return h(Loading,{label:"Scanning the network"});
+  if(!topo)return null;
+  const c=topo.counts||{};
+  return h("div",{className:"space-y-5"},
+    h("div",{className:"grid grid-cols-2 md:grid-cols-6 gap-3"},
+      h(Kpi,{label:"Core",value:c.core_router||0,tone:"violet",glyph:"◆",
+        hint:"Core routers. Highest blast radius — everything downstream loses service if one fails."}),
+      h(Kpi,{label:"Edge",value:c.edge_router||0,tone:"cyan",glyph:"⬢",
+        hint:"Edge routers, sitting between the core and the access layer."}),
+      h(Kpi,{label:"Access",value:c.access_router||0,tone:"teal",glyph:"⬟",
+        hint:"Access routers. These are the ones with the most alarms in a typical fleet."}),
+      h(Kpi,{label:"Switches",value:c.switch||0,tone:"slate",glyph:"▭",
+        hint:"Switches carry no alarms of their own here, so they inherit the status of their router."}),
+      h(Kpi,{label:"End devices",value:c.endpoint||0,tone:"slate",glyph:"•",
+        hint:"Servers, APs, cameras and gateways. Shown to make the blast radius of a fault concrete."}),
+      h(Kpi,{label:"At risk",value:modelsLoaded?(fleet?.n_at_risk??"—"):"—",tone:"rose",
+        sub:modelsLoaded?undefined:"model offline",
+        hint:"Routers whose predicted probability of a fault in the next 12 hours is above the alert threshold."})),
+    h(Panel,{title:"Live network topology",
+      subtitle:"Every site, router, switch and end device. Nodes are coloured by predicted fault risk; anything above the alert threshold pulses and its links animate. Hover any node for detail, click a router to inspect it.",
+      right:[
+        h("div",{key:"v",className:"flex rounded-lg overflow-hidden border border-cyan-500/20"},
+          [["map","Sites"],["tree","Hierarchy"]].map(([v,l])=>h("button",{key:v,onClick:()=>setView(v),
+            className:`px-3 py-1.5 text-xs ${view===v?"bg-cyan-500/20 text-cyan-200":"text-slate-400 hover:text-slate-200"}`},
+            l))),
+        view==="tree"&&h("label",{key:"e",className:"flex items-center gap-1.5 text-[11px] text-slate-400 px-2"},
+          h("input",{type:"checkbox",checked:eps,onChange:e=>setEps(e.target.checked)}),"end devices"),
+        h(Btn,{key:"r",size:"sm",variant:"ghost",onClick:reload},"Rescan")]},
+      view==="map"?h(MapView,{topo,fleet,onSelect})
+                  :h(TreeView,{topo,fleet,onSelect,selected:null,showEndpoints:eps}),
+      h("div",{className:"flex flex-wrap gap-x-5 gap-y-2 mt-3 text-[11px] text-slate-500"},
+        Object.entries(BAND).filter(([k])=>k!=="unscored").map(([k,v])=>
+          h("div",{key:k,className:"flex items-center gap-1.5"},
+            h("span",{className:"w-2.5 h-2.5 rounded-full",style:{background:v.c}}),v.l)),
+        h("div",{className:"flex items-center gap-1.5 text-slate-600"},"·"),
+        Object.entries(TYPE).map(([k,v])=>h("div",{key:k,className:"flex items-center gap-1.5"},
+          h("span",{style:{color:v.c}},v.i),v.l)))),
+    !modelsLoaded&&h(Note,{tone:"violet"},
+      h("strong",null,"Topology is live, predictions are not. "),
+      "The network below is real data from your alarm log. Risk scores appear once the model files are in place — see MODEL_SETUP.md."));
+}
+
+// --------------------------------------------------------------- FLEET
+function FleetTab({fleet,moments,loading,onSelect,reload,modelsLoaded}){
+  const [q,setQ]=useState(""),[only,setOnly]=useState(false),[sort,setSort]=useState("risk");
+  const [at,setAt]=useState("");
+  const [local,setLocal]=useState(null),[busy,setBusy]=useState(false),[err,setErr]=useState(null);
+
+  const pick=async v=>{
+    setAt(v); setErr(null);
+    if(!v){setLocal(null);return;}
+    setBusy(true);
+    try{ setLocal(await j(`/fleet?at=${encodeURIComponent(v)}`)); }
+    catch(e){ setErr(e.message); setLocal(null); }
+    finally{ setBusy(false); }
+  };
+
+  if(loading)return h(Loading,{label:"Scoring routers"});
+  const F=local||fleet;
+  if(!F)return null;
+
+  let rows=F.devices.filter(d=>(!only||d.fault_predicted)&&
+    (!q||d.device_id.toLowerCase().includes(q.toLowerCase())||(d.site||"").toLowerCase().includes(q.toLowerCase())));
+  if(sort==="impact")rows=[...rows].sort((a,b)=>b.n_downstream-a.n_downstream);
+  if(sort==="faults")rows=[...rows].sort((a,b)=>b.n_prior_faults-a.n_prior_faults);
+  const horizon=F.horizon_hours||12;
+
+  return h("div",{className:"space-y-4"},
+    h("div",{className:"grid grid-cols-2 md:grid-cols-4 gap-3"},
+      h(Kpi,{label:"Routers monitored",value:F.n_devices,tone:"cyan",
+        hint:"Devices that carry alarms of their own and can therefore be scored. Switches and end devices are excluded."}),
+      h(Kpi,{label:"Predicted faults",value:modelsLoaded?F.n_at_risk:"—",tone:"rose",
+        hint:`Routers scoring at or above the ${((F.threshold||0.7273)*100).toFixed(1)}% alert threshold, meaning the model expects a fault within ${horizon} hours.`}),
+      h(Kpi,{label:"Alert team",value:modelsLoaded?F.n_hardware:"—",tone:"violet",sub:"hardware",
+        hint:"Of the predicted faults, the ones Stage 2 classified as hardware. A human has to touch the device, so the action is to page the on-call team."}),
+      h(Kpi,{label:"Auto-remediate",value:modelsLoaded?F.n_software:"—",tone:"cyan",sub:"software",
+        hint:"Of the predicted faults, the ones Stage 2 classified as software. These can be attempted with a script — restart a process, reset a session."})),
+
+    h(Panel,{title:"Fleet risk dashboard",
+      subtitle:`Every monitored router scored on its last ${F.lookback_hours||24} hours of alarms, predicting ${horizon} hours ahead. Impact is how many downstream devices lose service if it fails.`,
+      right:[h(Btn,{key:1,size:"sm",variant:"ghost",
+               onClick:()=>window.open(API+"/alarms.csv","_blank")},"Alarm log CSV"),
+             h(Btn,{key:2,size:"sm",variant:"ghost",
+               onClick:()=>window.open(API+"/fleet.csv"+(at?`?at=${encodeURIComponent(at)}`:""),"_blank")},"Risk report CSV"),
+             h(Btn,{key:3,size:"sm",variant:"ghost",onClick:reload},"Refresh")]},
+
+      // --- as-of selector -------------------------------------------------
+      (moments?.length>1)&&h("div",{className:"mb-3 rounded-xl border border-cyan-500/15 bg-black/25 p-3"},
+        h("label",{className:"block text-[11px] text-slate-400 mb-1.5"},
+          "Score the fleet as of"),
+        h("select",{value:at,onChange:e=>pick(e.target.value),
+          className:"w-full bg-black/40 rounded-lg px-3 py-2 text-sm border border-cyan-500/20 outline-none focus:border-cyan-500/60"},
+          moments.map((m,i)=>h("option",{key:i,value:i===0?"":m.timestamp},m.label))),
+        h("p",{className:"text-[11px] text-slate-500 mt-1.5 leading-relaxed"},
+          "A log only rarely ends mid-incident, so at its newest timestamp most routers genuinely are quiet. "+
+          "Every other option here sits one hour before a failure the log actually recorded — inside the "+
+          `${horizon}-hour horizon, so a correct model should already be flagging that router.`)),
+      busy&&h("div",{className:"mb-3"},h(Loading,{label:"Rescoring the fleet"})),
+      h(Err,{msg:err}),
+      at&&!busy&&h("div",{className:"mb-3"},h(Note,null,
+        `Showing the fleet as it looked at ${fmtDateTime(F.analyzed_at)}. `,
+        "This is a replay, not the live view — the model is re-run on the alarms available at that moment.")),
+      F.quiet_note&&!busy&&h("div",{className:"mb-3"},h(Note,{tone:"violet"},F.quiet_note)),
+
+      h("div",{className:"flex gap-3 mb-3 flex-wrap items-center"},
+        h("input",{value:q,onChange:e=>setQ(e.target.value),placeholder:"Search router or site…",
+          className:"flex-1 min-w-[200px] bg-black/30 rounded-lg px-3 py-2 text-sm border border-cyan-500/15 outline-none focus:border-cyan-500/50"}),
+        h("select",{value:sort,onChange:e=>setSort(e.target.value),
+          className:"bg-black/30 rounded-lg px-3 py-2 text-xs border border-cyan-500/15"},
+          h("option",{value:"risk"},"Sort: risk"),h("option",{value:"impact"},"Sort: impact"),
+          h("option",{value:"faults"},"Sort: fault history")),
+        h("label",{className:"flex items-center gap-2 text-xs text-slate-400"},
+          h("input",{type:"checkbox",checked:only,onChange:e=>setOnly(e.target.checked)}),"At risk only")),
+      h("div",{className:"overflow-auto max-h-[30rem] rounded-xl border border-cyan-500/10"},
+        h("table",{className:"w-full text-sm"},
+          h("thead",{className:"text-[10px] uppercase tracking-wider text-slate-500 sticky top-0 bg-[#0a1626]"},
+            h("tr",null,["Router","Site","Type","Risk","Status","Action","Impact","24h","Faults","Log"].map(x=>
+              h("th",{key:x,className:"text-left py-2.5 px-3 font-semibold whitespace-nowrap"},x)))),
+          h("tbody",null,rows.map(d=>{const b=band(d.risk_band),T=TYPE[d.device_type]||TYPE.access_router;
+            return h("tr",{key:d.device_id,onClick:()=>onSelect(d.device_id),
+              className:"border-t border-cyan-500/[.07] hover:bg-cyan-500/[.05] cursor-pointer transition-colors"},
+              h("td",{className:"py-2 px-3 font-mono text-xs text-white whitespace-nowrap"},
+                h("span",{style:{color:T.c},className:"mr-1.5"},T.i),d.device_id),
+              h("td",{className:"py-2 px-3 text-slate-400 text-xs whitespace-nowrap"},d.site||"—"),
+              h("td",{className:"py-2 px-3 text-slate-500 text-[11px] whitespace-nowrap"},T.l),
+              h("td",{className:"py-2 px-3 font-mono",
+                style:{color:d.fault_predicted?BAND.critical.c:"#cbd5e1",
+                       fontWeight:d.fault_predicted?700:400}},pc(d.fault_probability)),
+              h("td",{className:"py-2 px-3"},h("span",{className:`px-2 py-0.5 rounded-md text-[10px] border ${b.bg} ${b.t} ${b.br} whitespace-nowrap`},b.l)),
+              h("td",{className:"py-2 px-3 text-[11px] whitespace-nowrap"},
+                d.action==="alert_team"?h("span",{style:{color:HW_COLOR}},"Alert team")
+                :d.action==="auto_remediate"?h("span",{style:{color:SW_COLOR}},"Auto-fix")
+                :h("span",{className:"text-slate-600"},"—")),
+              h("td",{className:"py-2 px-3 text-[11px] text-slate-400 whitespace-nowrap"},
+                d.n_downstream>0?`${d.n_downstream} dev · ${d.n_downstream_endpoints} EP`:"—"),
+              h("td",{className:"py-2 px-3 text-slate-400"},d.n_events_window),
+              h("td",{className:"py-2 px-3 text-slate-400"},d.n_prior_faults),
+              h("td",{className:"py-2 px-3"},h("button",{
+                onClick:e=>{e.stopPropagation();window.open(`${API}/devices/${encodeURIComponent(d.device_id)}/alarms.csv`,"_blank");},
+                className:"text-[11px] text-cyan-400 hover:text-cyan-300"},"CSV")));
+          })))),
+      h("div",{className:"flex flex-wrap gap-4 mt-3 text-[10px] text-slate-500"},
+        h("span",null,h("strong",{className:"text-slate-400"},"24h")," = alarms in the window the model reads"),
+        h("span",null,h("strong",{className:"text-slate-400"},"Faults")," = fault episodes in this router's whole history"),
+        h("span",null,h("strong",{className:"text-slate-400"},"Action")," = blank unless a fault is predicted; Stage 2 only runs on flagged routers")),
+      rows.length===0&&h("p",{className:"text-sm text-slate-500 py-8 text-center"},"No routers match.")));
+}
+
+// -------------------------------------------------- remediation panel
+function Remediation({deviceId,nFaults}){
+  const [d,setD]=useState(null),[err,setErr]=useState(null),[open,setOpen]=useState({});
+  const [busy,setBusy]=useState(false),[showOther,setShowOther]=useState(false),[showLog,setShowLog]=useState(false);
+  useEffect(()=>{
+    if(!deviceId){setD(null);return;}
+    let dead=false; setBusy(true); setErr(null); setOpen({}); setShowOther(false); setShowLog(false);
+    j(`/devices/${encodeURIComponent(deviceId)}/remediation?hours=8760&limit=25`)
+      .then(x=>{if(!dead)setD(x);}).catch(e=>{if(!dead)setErr(e.message);})
+      .finally(()=>{if(!dead)setBusy(false);});
+    return()=>{dead=true;};
+  },[deviceId]);
+  const TITLE="Alarm reference & remediation";
+  if(busy)return h(Panel,{title:TITLE},h(Loading,{label:"Reading alarm definitions"}));
+  if(err)return h(Panel,{title:TITLE},h(Err,{msg:err}));
+  if(!d)return null;
+
+  const sevCls=s=>{const c=SEVC[s]||"#64748b";
+    return {color:c,borderColor:c+"66",background:c+"18"};};
+  const field=(label,val)=>val?h("div",{className:"mt-2.5"},
+    h("div",{className:"text-[10px] uppercase tracking-wider text-slate-500 mb-1"},label),
+    h("div",{className:"text-[12px] text-slate-300 leading-relaxed whitespace-pre-line"},String(val))):null;
+
+  const item=(a,key)=>{
+    const isOpen=!!open[key], def=a.definition, hw=a.category==="hardware";
+    return h("div",{key,className:"rounded-xl border overflow-hidden "+
+        (a.is_fault?"border-rose-500/25 bg-rose-500/[.04]":"border-cyan-500/12 bg-black/25")},
+      h("button",{onClick:()=>setOpen({...open,[key]:!isOpen}),
+        className:"w-full text-left px-3.5 py-2.5 hover:bg-cyan-500/[.05] transition-colors"},
+        h("div",{className:"flex items-center gap-2 flex-wrap"},
+          a.is_fault&&h("span",{className:"px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-500/25 text-rose-200 border border-rose-500/40"},"FAULT"),
+          h(Kind,{hw}),
+          h("span",{className:"font-mono text-[12px] text-white"},a.alarm_name||"(unnamed)"),
+          h("span",{className:"px-1.5 py-0.5 rounded text-[10px] border",style:sevCls(a.severity)},a.severity),
+          a.count>1&&h("span",{className:"text-[10px] text-slate-500"},`×${a.count}`),
+          h("span",{className:"text-[10px] text-slate-600 ml-auto"},
+            (def?"how to fix":"no definition")+(isOpen?" ▲":" ▼"))),
+        h("div",{className:"text-[10px] text-slate-500 mt-1"},
+          `${a.alarm_type} · last seen ${fmtDateTime(a.last_seen)}`)),
+      isOpen&&h("div",{className:"px-3.5 pb-3.5 pt-1 border-t border-cyan-500/10"},
+        def?h("div",null,
+          field("What it means",def.description),
+          field("Impact on the system",def.impact_on_system),
+          field("Possible causes",def.possible_causes),
+          def.procedure
+            ? h("div",{className:"mt-3 rounded-lg border border-teal-500/25 bg-teal-500/[.06] p-3"},
+                h("div",{className:"text-[10px] uppercase tracking-wider text-teal-300 mb-1.5 font-semibold"},
+                  hw?"How to fix — hardware, alert the team":"How to fix — software, can be scripted"),
+                h("div",{className:"text-[12px] text-slate-200 leading-relaxed whitespace-pre-line"},String(def.procedure)))
+            : h("div",{className:"mt-3 text-[11px] text-slate-500 italic"},"No procedure documented for this alarm."))
+          :h("div",{className:"text-[11px] text-slate-500 italic py-1"},
+            d.dictionary_loaded?"This alarm is not in the loaded dictionary."
+                               :"Load the Huawei alarm dictionary on the Data tab to see the fix.")));
+  };
+
+  const faults=d.faults||[], other=d.other||[], log=d.fault_log||[];
+
+  // No faults: the panel is empty by design. Nothing failed, so there is nothing
+  // to remediate — routine alarm activity is tucked away behind a toggle.
+  if(!faults.length){
+    return h(Panel,{title:TITLE,
+      subtitle:"Every fault this router actually logged, with Huawei's documented fix."},
+      h("div",{className:"rounded-xl border border-teal-500/25 bg-teal-500/[.06] px-4 py-3.5 flex items-center gap-3"},
+        h("span",{className:"text-teal-300 text-lg"},"✓"),
+        h("div",null,
+          h("div",{className:"text-sm text-teal-100"},"Nothing to remediate"),
+          h("div",{className:"text-[11px] text-slate-400 mt-0.5"},
+            `This router has no fault episodes on record, so there are no fixes to show.`))),
+      other.length>0&&h("div",{className:"mt-3"},
+        h("button",{onClick:()=>setShowOther(v=>!v),
+          className:"text-[11px] text-slate-500 hover:text-slate-300"},
+          showOther?"Hide routine alarm activity ▲"
+                   :`Show routine alarm activity (${other.length} distinct alarms, none of them faults) ▼`),
+        showOther&&h("div",{className:"space-y-2 mt-2.5 max-h-[22rem] overflow-auto pr-1"},
+          other.map((a,i)=>item(a,"o"+i)))));
+  }
+
+  return h(Panel,{title:TITLE,
+    subtitle:"Every fault this router actually logged, with Huawei's documented fix. This is what turns a prediction into an action.",
+    right:d.dictionary_loaded
+      ? h("span",{className:"text-[10px] px-2 py-1 rounded-lg bg-teal-500/12 text-teal-300 border border-teal-500/30"},
+          `${d.n_faults_matched_to_dictionary}/${faults.length} faults have a documented fix`)
+      : h("span",{className:"text-[10px] px-2 py-1 rounded-lg bg-violet-500/12 text-violet-300 border border-violet-500/30"},"no dictionary loaded")},
+    h("div",{className:"space-y-3"},
+      h("div",{className:"text-[11px] text-slate-400"},
+        `${d.n_fault_events} fault event${d.n_fault_events===1?"":"s"} on record, `+
+        `across ${faults.length} distinct alarm${faults.length===1?"":"s"} — all listed below.`),
+      h("div",{className:"space-y-2"},faults.map((a,i)=>item(a,"f"+i))),
+      log.length>0&&h("div",null,
+        h("button",{onClick:()=>setShowLog(v=>!v),
+          className:"text-[11px] text-cyan-400 hover:text-cyan-300"},
+          showLog?"Hide the individual fault events ▲":`Show all ${log.length} fault events by date ▼`),
+        showLog&&h("div",{className:"mt-2 rounded-xl border border-cyan-500/12 overflow-hidden"},
+          log.map((f,i)=>h("div",{key:i,
+            className:"flex items-center gap-3 px-3 py-2 text-[11px] border-b border-cyan-500/[.07] last:border-0"},
+            h("span",{className:"font-mono text-slate-400 w-36 shrink-0"},fmtDateTime(f.timestamp)),
+            h(Kind,{hw:f.category==="hardware"}),
+            h("span",{className:"font-mono text-white truncate"},f.alarm_name||"(unnamed)"),
+            h("span",{className:"ml-auto px-1.5 py-0.5 rounded text-[10px] border shrink-0",
+              style:sevCls(f.severity)},f.severity))))),
+      other.length>0&&h("div",{className:"pt-1"},
+        h("button",{onClick:()=>setShowOther(v=>!v),
+          className:"text-[11px] text-slate-500 hover:text-slate-300"},
+          showOther?"Hide routine alarm activity ▲"
+                   :`Show routine alarm activity (${other.length} distinct alarms that never became faults) ▼`),
+        showOther&&h("div",{className:"space-y-2 mt-2.5 max-h-[22rem] overflow-auto pr-1"},
+          other.map((a,i)=>item(a,"o"+i))))));
+}
+
+// ---------------------------------------------------------- risk chart
+function RiskChart({timeline,faults,thr,horizon}){
+  const [hi,setHi]=useState(null);
+  const wrap=useRef(null);
+  const pts=(timeline||[]).filter(p=>p.fault_probability!=null);
+  const W=940,H=260,L=52,Rp=20,Tp=34,Bp=44;
+
+  if(!pts.length)return h("div",{className:"text-center py-12 text-sm text-slate-500"},
+    "Risk replay needs the model. The alarm history below is still live.");
+
+  const t0=new Date(pts[0].timestamp).getTime();
+  const t1=new Date(pts[pts.length-1].timestamp).getTime();
+  const span=Math.max(t1-t0,1);
+  const X=t=>L+((t-t0)/span)*(W-L-Rp);
+  const Y=p=>H-Bp-p*(H-Bp-Tp);
+  const line=pts.map(p=>`${X(new Date(p.timestamp).getTime())},${Y(p.fault_probability)}`).join(" ");
+  const fmt=ms=>new Date(ms).toLocaleDateString(undefined,{month:"short",day:"numeric"});
+  const nTicks=6;
+  const xticks=Array.from({length:nTicks},(_,i)=>t0+(span*i)/(nTicks-1));
+  const yticks=[0,0.25,0.5,0.75,1];
+
+  const onMove=e=>{
+    const el=wrap.current; if(!el)return;
+    const r=el.getBoundingClientRect();
+    const vx=((e.clientX-r.left)/Math.max(r.width,1))*W;
+    let best=0,bd=Infinity;
+    pts.forEach((p,i)=>{const dd=Math.abs(X(new Date(p.timestamp).getTime())-vx);
+      if(dd<bd){bd=dd;best=i;}});
+    setHi({i:best,x:e.clientX,y:e.clientY});
+  };
+
+  // Plain-language reading of the whole series, so the graph means something
+  // even before you hover it.
+  const first=pts[0].fault_probability, last=pts[pts.length-1].fault_probability;
+  const peak=pts.reduce((a,b)=>b.fault_probability>a.fault_probability?b:a,pts[0]);
+  const nCross=pts.filter(p=>p.fault_probability>=thr).length;
+  const dir=last>first*1.25&&last-first>0.03?"higher than":
+            first>last*1.25&&first-last>0.03?"lower than":"about the same as";
+  const days=Math.max(Math.round(span/86400000),1);
+
+  const hp=hi?pts[hi.i]:null;
+
+  return h("div",null,
+    h("div",{ref:wrap,className:"relative",
+        onMouseMove:onMove,onMouseLeave:()=>setHi(null)},
+      h("svg",{viewBox:`0 0 ${W} ${H}`,className:"w-full",style:{cursor:"crosshair"}},
+        h("defs",null,h("linearGradient",{id:"ag",x1:"0",y1:"0",x2:"0",y2:"1"},
+          h("stop",{offset:"0%",stopColor:"#22d3ee",stopOpacity:".34"}),
+          h("stop",{offset:"100%",stopColor:"#22d3ee",stopOpacity:"0"}))),
+        // y grid + labels
+        yticks.map(g=>h("g",{key:"y"+g},
+          h("line",{x1:L,x2:W-Rp,y1:Y(g),y2:Y(g),stroke:"#102944",strokeWidth:1}),
+          h("text",{x:L-8,y:Y(g)+3.5,textAnchor:"end",style:{fontSize:10,fill:"#5b7a99"}},
+            Math.round(g*100)+"%"))),
+        // axis title, above the plot so it cannot collide with the 100% tick
+        h("text",{x:L,y:16,style:{fontSize:10,fill:"#7c93ad"}},
+          `predicted probability of a fault in the next ${horizon}h`),
+        h("line",{x1:L,x2:L,y1:Tp,y2:H-Bp,stroke:"#1e3a5f",strokeWidth:1.4}),
+        h("line",{x1:L,x2:W-Rp,y1:H-Bp,y2:H-Bp,stroke:"#1e3a5f",strokeWidth:1.4}),
+        xticks.map((t,i)=>h("g",{key:"x"+i},
+          h("line",{x1:X(t),x2:X(t),y1:H-Bp,y2:H-Bp+5,stroke:"#1e3a5f",strokeWidth:1.2}),
+          h("text",{x:X(t),y:H-Bp+18,textAnchor:"middle",style:{fontSize:10,fill:"#5b7a99"}},fmt(t)))),
+        h("text",{x:(L+W-Rp)/2,y:H-6,textAnchor:"middle",style:{fontSize:9.5,fill:"#7c93ad"}},
+          "each point re-scores the router using only the alarms it had at that moment"),
+        h("polygon",{points:`${L},${H-Bp} ${line} ${W-Rp},${H-Bp}`,fill:"url(#ag)"}),
+        h("polyline",{points:line,fill:"none",stroke:"#22d3ee",strokeWidth:2.2,
+          style:{filter:"drop-shadow(0 0 6px #22d3ee55)"}}),
+        // alert threshold
+        h("line",{x1:L,x2:W-Rp,y1:Y(thr),y2:Y(thr),stroke:BAND.critical.c,strokeDasharray:"5 4",strokeWidth:1.3}),
+        h("text",{x:W-Rp,y:Y(thr)-6,textAnchor:"end",style:{fontSize:9.5,fill:BAND.critical.c}},
+          `alert threshold ${Math.round(thr*100)}%`),
+        // real fault episodes
+        (faults||[]).map((f,i)=>{const t=new Date(f.timestamp).getTime();
+          if(t<t0||t>t1)return null;
+          return h("g",{key:"f"+i},
+            h("line",{x1:X(t),x2:X(t),y1:Tp,y2:H-Bp,stroke:BAND.critical.c,strokeWidth:1,opacity:.45}),
+            h("circle",{cx:X(t),cy:Tp,r:3.2,fill:BAND.critical.c}));}),
+        // hover crosshair
+        hp&&h("g",null,
+          h("line",{x1:X(new Date(hp.timestamp).getTime()),x2:X(new Date(hp.timestamp).getTime()),
+            y1:Tp,y2:H-Bp,stroke:"#22d3ee",strokeWidth:1,opacity:.55}),
+          h("circle",{cx:X(new Date(hp.timestamp).getTime()),cy:Y(hp.fault_probability),
+            r:5,fill:"#03070f",stroke:"#22d3ee",strokeWidth:2.4}))),
+      hp&&h("div",{style:{position:"fixed",zIndex:200,pointerEvents:"none",
+          left:Math.min(hi.x+14,(window.innerWidth||1200)-300),
+          top:Math.min(hi.y+16,(window.innerHeight||800)-170)},
+          className:"glass rounded-lg px-3 py-2 text-[11px] leading-relaxed w-[268px] shadow-2xl"},
+        h("div",{className:"font-semibold text-white"},fmtDateTime(hp.timestamp)),
+        h("div",{className:"mt-1 flex justify-between"},
+          h("span",{className:"text-slate-400"},"Predicted risk"),
+          h("span",{className:"font-mono",
+            style:{color:hp.fault_probability>=thr?BAND.critical.c:"#e2e8f0"}},
+            (hp.fault_probability*100).toFixed(1)+"%")),
+        h("div",{className:"flex justify-between"},
+          h("span",{className:"text-slate-400"},"Alarms in prior 24h"),
+          h("span",{className:"font-mono text-slate-200"},hp.n_events_window)),
+        h("div",{className:"flex justify-between"},
+          h("span",{className:"text-slate-400"},"Faults before this point"),
+          h("span",{className:"font-mono text-slate-200"},hp.n_prior_faults)),
+        h("div",{className:"mt-1.5 pt-1.5 border-t border-cyan-500/15 text-[10px] text-slate-400"},
+          hp.fault_probability>=thr
+            ? `Above the ${Math.round(thr*100)}% threshold — at this moment the model would have raised an alert.`
+            : `Below the ${Math.round(thr*100)}% threshold — no alert would have been raised here.`))),
+
+    // ---- what the chart says, in words -----------------------------------
+    h("div",{className:"mt-3 rounded-xl border border-cyan-500/15 bg-black/25 p-3.5 space-y-1.5"},
+      h("div",{className:"text-[11px] uppercase tracking-wider text-slate-500"},"Reading this chart"),
+      h("p",{className:"text-[12px] text-slate-300 leading-relaxed"},
+        `Over the last ${days} days this router's predicted risk moved between `+
+        `${(Math.min(...pts.map(p=>p.fault_probability))*100).toFixed(1)}% and `+
+        `${(peak.fault_probability*100).toFixed(1)}%. It ends at `,
+        h("strong",{key:"e",className:"text-white"},`${(last*100).toFixed(1)}%`),
+        `, which is ${dir} where it started.`),
+      h("p",{className:"text-[12px] text-slate-300 leading-relaxed"},
+        nCross>0
+          ? `The model crossed the ${Math.round(thr*100)}% alert threshold at ${nCross} of the `+
+            `${pts.length} sampled moments — each of those is a point where this router would have `+
+            `been flagged for action.`
+          : `It never crossed the ${Math.round(thr*100)}% alert threshold in this period, so this `+
+            `router was never flagged for action. The peak of ${(peak.fault_probability*100).toFixed(1)}% `+
+            `on ${fmtDateTime(peak.timestamp).slice(0,12)} was its closest approach.`),
+      (faults||[]).length>0
+        ? h("p",{className:"text-[12px] text-slate-300 leading-relaxed"},
+            `The ${faults.length} vertical marker${faults.length===1?"":"s"} are real fault episodes from the log. `+
+            "The useful thing to look for is the line climbing into a marker: that is degradation the model "+
+            "saw coming, which is the whole point of predicting instead of reacting.")
+        : h("p",{className:"text-[12px] text-slate-300 leading-relaxed"},
+            "There are no fault markers because this router never actually failed in the observed period."),
+      h("p",{className:"text-[11px] text-slate-500 leading-relaxed pt-0.5"},
+        "Hover anywhere on the line for the exact score, the number of alarms behind it, and whether an alert would have fired.")));
+}
+
+// --------------------------------------------------------- alarm profile
+function AlarmProfile({d}){
+  const tip=useTip();
+  const types=d.alarm_type_breakdown||{}, sevs=d.severity_breakdown||{};
+  const total=Object.values(types).reduce((a,b)=>a+b,0)||1;
+  const sevTotal=Object.values(sevs).reduce((a,b)=>a+b,0)||1;
+  const hwN=Object.entries(types).filter(([k])=>HW_TYPES.includes(k)).reduce((a,[,v])=>a+v,0);
+  const swN=total-hwN;
+
+  const TYPE_MEANS={
+    equipmentAlarm:"A physical component reported a problem — board, optics, power.",
+    environmentalAlarm:"Temperature, fans or power environment outside limits.",
+    communicationsAlarm:"A protocol session or link changed state — BGP, LDP, OSPF.",
+    processingErrorAlarm:"Software on the device hit an error — CPU, memory, a process.",
+    qualityOfServiceAlarm:"Traffic quality degraded — congestion, loss, rate thresholds.",
+  };
+  const SEV_MEANS={
+    Critical:"Service-affecting. Needs attention now.",
+    Major:"Serious, likely to become service-affecting.",
+    Minor:"Worth noting; not urgent on its own.",
+    Warning:"Informational. Usually noise unless it repeats.",
+  };
+
+  const bar=(label,val,tot,color,note,hint)=>{
+    const pctv=val/tot*100;
+    return h("div",{key:label,className:"mb-2.5 hoverable",
+        onMouseMove:e=>tip.show(e,hint),onMouseLeave:tip.hide},
+      h("div",{className:"flex justify-between items-baseline text-[11px] mb-1"},
+        h("span",{className:"text-slate-300 truncate pr-2"},label),
+        h("span",{className:"font-mono text-slate-400 shrink-0"},
+          `${val.toLocaleString()}  ·  ${pctv.toFixed(pctv<1?1:0)}%`)),
+      h("div",{className:"h-2 bg-slate-800/60 rounded-full overflow-hidden"},
+        h("div",{className:"h-full rounded-full",style:{width:Math.max(pctv,1.5)+"%",background:color}})),
+      note&&h("div",{className:"text-[10px] text-slate-600 mt-0.5"},note));
+  };
+
+  const splitHint=hw=>h("div",null,
+    h("div",{className:"font-semibold text-white mb-1"},hw?"Hardware alarms":"Software alarms"),
+    h("div",{className:"flex justify-between text-slate-300"},
+      h("span",null,"Count"),h("span",{className:"font-mono"},(hw?hwN:swN).toLocaleString())),
+    h("div",{className:"flex justify-between text-slate-300"},
+      h("span",null,"Share"),h("span",{className:"font-mono"},((hw?hwN:swN)/total*100).toFixed(1)+"%")),
+    h("div",{className:"text-slate-400 mt-1.5"},
+      hw?"Equipment and environmental alarms. A physical part is involved, so the action is to alert the on-call team."
+        :"Communications, processing-error and quality-of-service alarms. These can usually be attempted with a script."));
+
+  return h("div",{className:"space-y-5"},tip.node,
+    h("div",null,
+      h("div",{className:"flex items-center justify-between mb-2"},
+        h("div",{className:"text-[10px] uppercase tracking-wider text-slate-500"},"Hardware vs software"),
+        h("div",{className:"text-[10px] text-slate-500"},`${total.toLocaleString()} alarms`)),
+      h("div",{className:"flex h-7 rounded-lg overflow-hidden border border-cyan-500/15"},
+        hwN>0&&h("div",{className:"flex items-center justify-center text-[10px] font-semibold text-slate-900 hoverable",
+          style:{width:(hwN/total*100)+"%",background:HW_COLOR},
+          onMouseMove:e=>tip.show(e,splitHint(true)),onMouseLeave:tip.hide},
+          hwN/total>0.12?`${(hwN/total*100).toFixed(0)}%`:""),
+        swN>0&&h("div",{className:"flex items-center justify-center text-[10px] font-semibold text-slate-900 hoverable",
+          style:{width:(swN/total*100)+"%",background:SW_COLOR},
+          onMouseMove:e=>tip.show(e,splitHint(false)),onMouseLeave:tip.hide},
+          swN/total>0.12?`${(swN/total*100).toFixed(0)}%`:"")),
+      h("div",{className:"flex gap-4 mt-1.5 text-[10px] text-slate-500"},
+        h("span",{className:"flex items-center gap-1.5"},
+          h("span",{className:"w-2.5 h-2.5 rounded-sm",style:{background:HW_COLOR}}),
+          "hardware ",h("span",{className:"font-mono",style:{color:HW_COLOR}},hwN.toLocaleString())),
+        h("span",{className:"flex items-center gap-1.5"},
+          h("span",{className:"w-2.5 h-2.5 rounded-sm",style:{background:SW_COLOR}}),
+          "software ",h("span",{className:"font-mono",style:{color:SW_COLOR}},swN.toLocaleString())))),
+    h("div",null,
+      h("div",{className:"text-[10px] uppercase tracking-wider text-slate-500 mb-2"},"By severity"),
+      ["Critical","Major","Minor","Warning"].filter(k=>sevs[k]).map(k=>
+        bar(k,sevs[k],sevTotal,SEVC[k],null,
+          h("div",null,
+            h("div",{className:"font-semibold text-white mb-1"},k+" severity"),
+            h("div",{className:"flex justify-between text-slate-300"},
+              h("span",null,"Count"),h("span",{className:"font-mono"},sevs[k].toLocaleString())),
+            h("div",{className:"flex justify-between text-slate-300"},
+              h("span",null,"Share of all alarms"),
+              h("span",{className:"font-mono"},(sevs[k]/sevTotal*100).toFixed(1)+"%")),
+            h("div",{className:"text-slate-400 mt-1.5"},SEV_MEANS[k]))))),
+    h("div",null,
+      h("div",{className:"text-[10px] uppercase tracking-wider text-slate-500 mb-2"},"Most frequent alarm types"),
+      Object.entries(types).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>{
+        const hw=HW_TYPES.includes(k);
+        return bar(k,v,total,hw?HW_COLOR:SW_COLOR,
+          hw?"hardware — alert the team":"software — usually scriptable",
+          h("div",null,
+            h("div",{className:"font-semibold text-white mb-1"},k),
+            h("div",{className:"flex justify-between text-slate-300"},
+              h("span",null,"Count"),h("span",{className:"font-mono"},v.toLocaleString())),
+            h("div",{className:"flex justify-between text-slate-300"},
+              h("span",null,"Share of all alarms"),
+              h("span",{className:"font-mono"},(v/total*100).toFixed(1)+"%")),
+            h("div",{className:"mt-1.5 mb-1"},h(Kind,{hw})),
+            h("div",{className:"text-slate-400"},TYPE_MEANS[k]||""),
+            h("div",{className:"text-slate-500 mt-1"},
+              hw?"Counted as hardware, so Stage 2 routes this to the on-call team."
+                :"Counted as software, so Stage 2 routes this to scripted remediation.")));
+      })));
+}
+
+// ------------------------------------------------------------- ROUTER
+function RouterTab({devices,selected,setSelected}){
+  const [d,setD]=useState(null),[err,setErr]=useState(null),[busy,setBusy]=useState(false);
+  const load=useCallback(async id=>{
+    if(!id){setD(null);return;} setBusy(true);setErr(null);setD(null);
+    try{setD(await j(`/devices/${encodeURIComponent(id)}/history?points=60`));}
+    catch(e){setErr(e.message);}finally{setBusy(false);}
+  },[]);
+  useEffect(()=>{load(selected);},[selected,load]);
+
+  const ab=d?.alarm_breakdown;
+  const horizon=d?.horizon_hours||12;
+
+  return h("div",{className:"space-y-4"},
+    h(Panel,{title:"Router inspector",
+      subtitle:"A live score tells you the risk right now. This shows the trajectory — a router whose risk climbs week over week is degrading toward failure, which is what you want to catch before it crosses the threshold."},
+      h("div",{className:"flex gap-2 flex-wrap"},
+        h("select",{value:selected||"",onChange:e=>setSelected(e.target.value),
+          className:"flex-1 min-w-[240px] bg-black/30 rounded-lg px-3 py-2.5 text-sm border border-cyan-500/20 outline-none focus:border-cyan-500/60"},
+          h("option",{value:""},devices.length?"Select a router…":"No routers loaded"),
+          devices.map(x=>h("option",{key:x.device_id,value:x.device_id},
+            `${x.device_id} — ${x.site||x.device_role} · ${x.n_faults} faults`))),
+        selected&&h(Btn,{size:"sm",variant:"ghost",
+          onClick:()=>window.open(`${API}/devices/${encodeURIComponent(selected)}/alarms.csv`,"_blank")},"Alarm log CSV"))),
+    err&&h(Err,{msg:err}),
+    busy&&h(Loading,{label:"Replaying history"}),
+    !selected&&!busy&&h(Panel,null,h(Empty,{title:"No router selected",
+      body:"Pick a router above, or click any node on the Overview map."})),
+    d&&h("div",{className:"space-y-4 rise"},
+      h("div",{className:"grid grid-cols-2 md:grid-cols-5 gap-3"},
+        h(Kpi,{label:"Alarms",value:d.n_events_total,tone:"cyan",
+          hint:"Every alarm row logged for this router: raises and clears, faults and routine noise alike."}),
+        h(Kpi,{label:"Fault episodes",value:d.n_fault_episodes,tone:"rose",
+          hint:"Only the alarms the log marks as a real failure. This is almost always far smaller than the alarm count."}),
+        h(Kpi,{label:"Hardware",value:d.n_hw_faults,tone:"violet",
+          hint:"Fault episodes on equipment or environmental alarms — the ones that need a human."}),
+        h(Kpi,{label:"Software",value:d.n_sw_faults,tone:"cyan",
+          hint:"Fault episodes on communications, processing or QoS alarms — the ones a script can attempt."}),
+        h(Kpi,{label:"Observed",value:d.observed_days+"d",tone:"slate",
+          hint:"Days between this router's first and last alarm in the loaded log."})),
+
+      // ---- alarms vs faults, spelled out ------------------------------
+      ab&&h(Panel,{pad:"p-4"},
+        h("div",{className:"flex items-start gap-3"},
+          h("span",{className:"text-[10px] uppercase tracking-wider text-slate-500 mt-0.5 shrink-0 w-28"},
+            "Alarms vs faults"),
+          h("p",{className:"text-[12px] text-slate-300 leading-relaxed"},ab.explanation))),
+
+      h(Panel,null,
+        h("div",{className:"flex items-start justify-between gap-4 flex-wrap"},
+          h("div",{className:"flex items-center gap-3"},
+            h("div",{className:"text-2xl",style:{color:(TYPE[d.device.device_type]||TYPE.access_router).c}},
+              (TYPE[d.device.device_type]||TYPE.access_router).i),
+            h("div",null,
+              h("div",{className:"text-xl font-bold text-white font-mono neon"},d.device.device_id),
+              h("div",{className:"text-xs text-slate-400 mt-0.5"},
+                `${d.device.model||""} · ${d.device.site||""} · ${(TYPE[d.device.device_type]||{}).l||""}`))),
+          h("div",{className:"flex gap-2 flex-wrap"},
+            d.device.n_downstream>0&&h("div",{className:"px-3 py-1.5 rounded-lg text-[11px] border bg-cyan-500/10 text-cyan-200 border-cyan-500/30"},
+              `${d.device.n_downstream} downstream · ${d.device.n_downstream_endpoints} end devices`),
+            h("div",{className:`px-3 py-1.5 rounded-lg text-[11px] border ${
+              d.health_tier==="chronic"?"bg-rose-500/12 text-rose-300 border-rose-500/40":
+              d.health_tier==="moderate"?"bg-purple-500/12 text-purple-300 border-purple-500/40":
+              "bg-teal-500/12 text-teal-300 border-teal-500/35"}`},
+              d.health_tier==="chronic"?"Repeat offender":d.health_tier==="moderate"?"Occasional faults":"✓ Healthy"))),
+        h("p",{className:"text-sm text-slate-300 mt-3 bg-black/25 rounded-xl p-3 border border-cyan-500/10"},d.health_assessment)),
+
+      h(Panel,{title:"Predicted risk over time",
+        subtitle:"Each point re-runs the model as it would have seen this router at that moment. Hover the line for the numbers behind any point.",
+        right:h("span",{className:`text-[11px] px-2.5 py-1 rounded-lg ${
+          d.risk_trend==="rising"?"bg-rose-500/15 text-rose-300":
+          d.risk_trend==="falling"?"bg-teal-500/15 text-teal-300":"bg-slate-700/40 text-slate-400"}`},
+          d.risk_trend==="rising"?"↗ Risk rising":d.risk_trend==="falling"?"↘ Risk falling":"→ Stable")},
+        h(RiskChart,{timeline:d.timeline,faults:d.fault_events,
+          thr:d.current.threshold||d.threshold||0.7273,horizon})),
+
+      h("div",{className:"grid lg:grid-cols-2 gap-4"},
+        h(Panel,{title:"Current assessment"},
+          h("div",{className:"flex gap-5 items-center flex-wrap"},
+            h(Dial,{p:d.current.fault_probability,threshold:d.current.threshold}),
+            h("div",{className:"flex-1 min-w-[190px] space-y-3"},
+              h(Verdict,{r:d.current,horizon}),
+              h("div",{className:"text-[11px] text-slate-500"},
+                `${d.current.n_events_window} alarms in the last ${d.lookback_hours||24}h · `+
+                `${d.current.history.n_prior_faults} prior fault episodes`))),
+          d.current.explanation&&h("div",{className:"mt-4 pt-4 border-t border-cyan-500/10"},
+            h(Explain,{ex:d.current.explanation}))),
+        h(Panel,{title:"Alarm profile",
+          subtitle:`How this router's ${d.n_events_total.toLocaleString()} alarms break down. Hover any bar for the exact counts and what that alarm class means.`},
+          h(AlarmProfile,{d}))),
+
+      h(Remediation,{deviceId:d.device.device_id,nFaults:d.n_fault_episodes})));
+}
+
+// ------------------------------------------------------------ COMPARE
+function CompareTab({devices}){
+  const [a,setA]=useState(""),[b,setB]=useState(""),[swap,setSwap]=useState(true);
+  const [res,setRes]=useState(null),[err,setErr]=useState(null),[busy,setBusy]=useState(false);
+  useEffect(()=>{
+    if(devices.length&&!a&&!b){
+      const s=[...devices].sort((x,y)=>y.n_faults-x.n_faults);
+      const chronic=s[0], healthy=[...s].reverse().find(d=>d.device_role===chronic?.device_role)||s[s.length-1];
+      setA(chronic?.device_id||"");setB(healthy?.device_id||"");
+    }
+  },[devices]);
+  const run=async()=>{if(!a||!b)return;setBusy(true);setErr(null);
+    try{setRes(await j(`/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&swap_alarms=${swap}`));}
+    catch(e){setErr(e.message);}finally{setBusy(false);}};
+  const side=(r,lbl,tone)=>{if(!r)return null;
+    return h(Panel,{title:lbl,className:tone},
+      h("div",{className:"flex gap-4 items-center flex-wrap"},
+        h(Dial,{p:r.fault_probability,threshold:r.threshold,size:132}),
+        h("div",{className:"flex-1 min-w-[170px] space-y-2 text-[11px]"},
+          h("div",{className:"font-mono text-white text-sm"},r.device_id),
+          h("div",{className:"text-slate-500"},`${r.site||""} · ${r.device_role}`),
+          h("div",{className:"flex justify-between border-t border-cyan-500/10 pt-2"},
+            h("span",{className:"text-slate-400"},"Prior faults"),
+            h("span",{className:"font-mono text-white font-semibold"},r.history.n_prior_faults)),
+          h("div",{className:"flex justify-between"},
+            h("span",{className:"text-slate-400"},"Alarms in 24h"),
+            h("span",{className:"font-mono text-white"},r.n_events_window)))),
+      r.note&&h("div",{className:"text-[10px] text-cyan-300/80 mt-3 italic"},r.note));};
+  return h("div",{className:"space-y-4"},
+    h(Panel,{title:"Controlled comparison",
+      subtitle:"In normal operation a router's alarms and its fault history change together, so you can never tell which drove a prediction. This holds the alarms constant and varies only the history — the one test that proves a repeat-offender is ranked above a never-failed router facing identical symptoms."},
+      h("div",{className:"space-y-3"},
+        h("div",{className:"grid md:grid-cols-2 gap-3"},
+          [["Router A (expect: more faults)",a,setA],["Router B (expect: fewer faults)",b,setB]].map(([lbl,val,set],i)=>
+            h("div",{key:i},h("label",{className:"block text-[11px] text-slate-400 mb-1"},lbl),
+              h("select",{value:val,onChange:e=>set(e.target.value),
+                className:"w-full bg-black/30 rounded-lg px-3 py-2.5 text-sm border border-cyan-500/20"},
+                h("option",{value:""},devices.length?"Select…":"No routers loaded"),
+                devices.map(d=>h("option",{key:d.device_id,value:d.device_id},
+                  `${d.device_id} — ${d.n_faults} faults · ${d.device_role}`)))))),
+        h("label",{className:"flex items-start gap-2.5 text-xs text-slate-300 bg-black/25 rounded-xl p-3 border border-cyan-500/10 cursor-pointer"},
+          h("input",{type:"checkbox",checked:swap,onChange:e=>setSwap(e.target.checked),className:"mt-0.5 accent-cyan-500"}),
+          h("span",null,h("strong",{className:"text-cyan-200"},"Hold alarms constant (recommended). "),
+            "Score both routers on Router A's alarm pattern, so the only difference is each router's own fault history.")),
+        h(Btn,{onClick:run,disabled:busy||!a||!b},busy?"Comparing…":"Run comparison"),
+        h(Err,{msg:err}))),
+    res&&h("div",{className:"space-y-4 rise"},
+      h(Panel,null,
+        h("div",{className:"text-center py-1"},
+          h("div",{className:"text-[10px] uppercase tracking-[.2em] text-slate-500"},"Result"),
+          h("div",{className:"text-lg font-semibold text-white mt-1.5"},res.verdict)),
+        res.history_check&&h("div",{className:"mt-3"},h(Note,null,res.history_check)),
+        res.role_caveat&&h("div",{className:"mt-2"},h(Note,{tone:"violet"},res.role_caveat))),
+      h("div",{className:"grid md:grid-cols-2 gap-4"},
+        side(res.a,"Router A","ring-1 ring-rose-500/20"),
+        side(res.b,"Router B","ring-1 ring-teal-500/20")),
+      h(CompareContext,{c:res.context})));
+}
+
+// --------------------------------------------------------------- DATA
+function DataTab({health,onSeeded}){
+  const [busy,setBusy]=useState(null),[err,setErr]=useState(null),[ok,setOk]=useState(null);
+  const [dictOk,setDictOk]=useState(null);
+  const upload=async f=>{
+    if(!f)return;setBusy("upload");setErr(null);setOk(null);
+    const fd=new FormData();fd.append("file",f);
+    try{const r=await j("/seed",{method:"POST",body:fd});setOk({...r,file:f.name});onSeeded&&onSeeded();}
+    catch(e){setErr(`Could not import ${f.name}: ${e.message}`);}
+    finally{setBusy(null);}};
+  const demo=async()=>{setBusy("demo");setErr(null);setOk(null);setDictOk(null);
+    try{const r=await j("/seed/demo",{method:"POST"});setOk({...r,file:"the built-in demo network"});onSeeded&&onSeeded();}
+    catch(e){setErr(e.message);}finally{setBusy(null);}};
+  const upDict=async f=>{if(!f)return;setBusy("dict");setErr(null);setDictOk(null);
+    const fd=new FormData();fd.append("file",f);
+    try{setDictOk(await j("/dictionary",{method:"POST",body:fd}));onSeeded&&onSeeded();}
+    catch(e){setErr(`Could not import ${f.name}: ${e.message}`);}finally{setBusy(null);}};
+  const row=(k,v,tone)=>h("div",{className:"flex justify-between items-center border-b border-cyan-500/[.08] py-2.5"},
+    h("span",{className:"text-slate-400 text-xs"},k),h("span",{className:`text-sm font-mono ${tone||"text-white"}`},v));
+  const dictLoaded=!!health?.dictionary_loaded;
+  const isDemo=health?.data_source==="demo";
+
+  return h("div",{className:"space-y-4"},
+    // ---- result banner: always says exactly what happened ---------------
+    ok&&h("div",{className:"rounded-xl border p-4 rise "+
+        ((ok.n_routers||0)<3?"border-purple-500/40 bg-purple-500/[.07]":"border-teal-500/35 bg-teal-500/[.07]")},
+      h("div",{className:"text-sm "+((ok.n_routers||0)<3?"text-purple-100":"text-teal-100")},
+        `Loaded ${(ok.n_alarms||0).toLocaleString()} alarms · ${ok.n_routers||0} routers · `+
+        `${ok.n_devices||0} devices in total (routers plus the switches and end devices built from them) — from ${ok.file}.`),
+      ok.date_range&&h("div",{className:"text-[11px] text-slate-400 mt-1.5"},
+        `Log covers ${String(ok.date_range[0]).slice(0,10)} to ${String(ok.date_range[1]).slice(0,10)}. `+
+        `The app treats the newest alarm as "now".`),
+      (ok.n_routers||0)<3&&h("div",{className:"text-[12px] text-purple-100/90 mt-2 leading-relaxed"},
+        h("strong",null,"The import worked, but that file only had one router in it. "),
+        "A file such as ",h("code",{className:"text-purple-200"},"CORE-002_alarms.csv"),
+        " is a single router's export, so the whole fleet is now that one router — which looks like nothing happened. ",
+        "For the full network upload ",h("code",{className:"text-purple-200"},"synthetic_alarm_log.csv"),
+        " from your training pipeline instead."),
+      h("div",{className:"text-[11px] text-slate-400 mt-2"},
+        "Open the Overview or Fleet tab to see it.")),
+    h(Err,{msg:err}),
+
+    h("div",{className:"grid lg:grid-cols-2 gap-4"},
+      // ---- 1. real data ------------------------------------------------
+      h(Panel,{title:"1 · Load your own network",
+        subtitle:"Import an alarm-log CSV. Every router, its role and its alarm stream are read in, and the topology is rebuilt from it. This replaces whatever network is currently loaded."},
+        h("div",{className:"space-y-3"},
+          h(Note,null,h("strong",null,"Use synthetic_alarm_log.csv "),
+            "— the full-fleet log from your training pipeline. Required columns: device_id, timestamp, alarm_type, severity, raise_or_clear. Optional but recommended: device_role, is_fault_episode, alarm_id, alarm_name."),
+          h("input",{type:"file",accept:".csv",disabled:busy==="upload",
+            onChange:e=>{const f=e.target.files[0];e.target.value="";upload(f);},
+            className:"block w-full text-sm text-slate-400 file:mr-3 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:bg-gradient-to-r file:from-cyan-500 file:to-teal-500 file:text-slate-900 file:font-semibold file:cursor-pointer"}),
+          busy==="upload"&&h(Loading,{label:"Importing and building the topology"}),
+          h("p",{className:"text-[11px] text-slate-500 leading-relaxed"},
+            "Nothing happens until you pick a file, and the result appears in the banner at the top of this tab — ",
+            "including a warning if the file turns out to contain only one router. ",
+            "You can also place it at ",h("code",{className:"text-slate-400"},"backend/data/alarm_log.csv"),
+            " to load it automatically on startup."))),
+
+      // ---- 2. demo -----------------------------------------------------
+      h(Panel,{title:"2 · Or generate the demo network",
+        subtitle:"For when you have no data to hand, or you want something guaranteed to have faults in it."},
+        h("div",{className:"space-y-3"},
+          h(Note,null,
+            h("strong",null,"What it is for. "),
+            "It builds a complete fictional Tunisian operator network from scratch — 10 sites, 34 routers, "+
+            "the switches and end devices under them, and 120 days of alarm history — and deliberately leaves "+
+            "several routers mid-failure at the end of the data. ",
+            h("strong",null,"That last part is the point: "),
+            "it is the only way to see the Fleet tab's Predicted faults, Alert team and Auto-remediate tiles "+
+            "with numbers in them, because a real historical log usually ends on a quiet night."),
+          h(Btn,{onClick:demo,disabled:busy==="demo"},busy==="demo"?"Generating…":"Generate demo network"),
+          h("p",{className:"text-[11px] text-slate-500 leading-relaxed"},
+            "Replaces the network currently loaded. If the alarm dictionary is loaded it reuses those real "+
+            "Huawei alarm names, so every alarm in the demo has a documented fix instead of reading “no definition”."),
+          isDemo&&h("div",{className:"text-[11px] text-cyan-300/90"},
+            "You are currently viewing the demo network.")))),
+
+    // ---- 3. dictionary -------------------------------------------------
+    h(Panel,{title:"3 · Huawei alarm dictionary  (optional)",
+      subtitle:dictLoaded
+        ? "Loaded. Alarms across the app now show their official description, system impact, probable causes and Huawei's documented fix procedure."
+        : "Load huawei_alarm_dictionary_final.csv to show what each alarm means and how to fix it. Everything else in the app works without it.",
+      right:dictLoaded
+        ? h("span",{className:"text-[10px] px-2 py-1 rounded-lg bg-teal-500/12 text-teal-300 border border-teal-500/30"},
+            `${(health.n_dictionary||0).toLocaleString()} definitions loaded`)
+        : h("span",{className:"text-[10px] px-2 py-1 rounded-lg bg-slate-600/15 text-slate-400 border border-slate-600/40"},"not loaded")},
+      h("div",{className:"space-y-3"},
+        dictOk&&h("div",{className:"rounded-xl border border-teal-500/35 bg-teal-500/[.07] p-3"},
+          h("div",{className:"text-sm text-teal-100"},
+            `${dictOk.n_entries.toLocaleString()} definitions loaded · `+
+            `${dictOk.n_unique_alarms.toLocaleString()} distinct alarms · `+
+            `${dictOk.n_with_procedure.toLocaleString()} include a fix procedure.`),
+          dictOk.demo_regenerated&&h("div",{className:"text-[11px] text-slate-300 mt-1.5"},
+            "The demo network was regenerated so its alarm names come from this dictionary — "+
+            "every alarm in the Router inspector now resolves to a real definition.")),
+        dictLoaded&&!dictOk&&h(Note,null,
+          h("strong",null,"Already loaded — you do not need to do anything here. "),
+          "The upload box stays visible for one reason only: to replace this dictionary with a newer or "+
+          "different export. The app keeps the dictionary separate from the network data, so re-importing a "+
+          "network or regenerating the demo never wipes it, and it is not re-asked for on every load."),
+        h("input",{type:"file",accept:".csv",disabled:busy==="dict",
+          onChange:e=>{const f=e.target.files[0];e.target.value="";upDict(f);},
+          className:"block w-full text-sm text-slate-400 file:mr-3 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:bg-gradient-to-r file:from-violet-500 file:to-indigo-500 file:text-white file:font-semibold file:cursor-pointer"}),
+        busy==="dict"&&h(Loading,{label:"Importing alarm definitions"}),
+        h("p",{className:"text-[11px] text-slate-500"},
+          "Tip: place it at ",h("code",{className:"text-slate-400"},"backend/data/huawei_alarm_dictionary_final.csv"),
+          " and it loads automatically on startup, before the demo network is built."))),
+
+    h(Panel,{title:"System status"},
+      h("div",{className:"grid sm:grid-cols-2 gap-x-8"},
+        h("div",null,
+          row("Model",health?.models_loaded?"online":"offline",health?.models_loaded?"text-teal-300":"text-rose-300"),
+          row("Network data",health?.data_loaded?"loaded":"empty",health?.data_loaded?"text-teal-300":"text-purple-300"),
+          row("Source",isDemo?"demo network":"your CSV"),
+          row("Prediction window",`${health?.lookback_hours||24}h in → ${health?.horizon_hours||12}h ahead`)),
+        h("div",null,
+          row("Devices",health?.n_devices||0),
+          row("Routers monitored",health?.n_routers||0),
+          row("Alarms",(health?.n_alarms||0).toLocaleString()),
+          row("Alarm dictionary",dictLoaded?`${(health.n_dictionary||0).toLocaleString()} entries`:"not loaded",
+              dictLoaded?"text-teal-300":"text-slate-400"))),
+      !health?.models_loaded&&h("div",{className:"mt-4"},h(Note,{tone:"violet"},
+        h("strong",null,"Model offline. "),"Topology, alarms and CSV exports all work without it. Risk predictions need stage1_fault_model.json and stage2_type_model.json in backend/models/ — see MODEL_SETUP.md."))));
+}
+
+// --------------------------------------------------------------- ALERTS
+function Chat({alertId,opening}){
+  const [msgs,setMsgs]=useState([]),[q,setQ]=useState("");
+  const [busy,setBusy]=useState(false),[err,setErr]=useState(null),[asst,setAsst]=useState(null);
+  const endRef=useRef(null);
+  useEffect(()=>{
+    let dead=false;setMsgs([]);setErr(null);
+    j(`/alerts/${alertId}/chat`).then(d=>{
+      if(dead)return;
+      setMsgs(d.messages||[]);
+      setAsst(d.assistant||null);
+    }).catch(()=>{});
+    return()=>{dead=true;};
+  },[alertId]);
+  const engine=asst?.engine;
+  useEffect(()=>{endRef.current&&endRef.current.scrollIntoView({behavior:"smooth",block:"end"});},[msgs,busy]);
+
+  const send=async(text)=>{
+    const m=(text??q).trim(); if(!m||busy)return;
+    setQ("");setBusy(true);setErr(null);
+    setMsgs(v=>[...v,{role:"user",content:m,id:"tmp"+Date.now()}]);
+    try{ const d=await j(`/alerts/${alertId}/chat`,{method:"POST",
+      headers:{"content-type":"application/json"},body:JSON.stringify({message:m})});
+      setMsgs(d.messages||[]);
+    }catch(e){ setErr(e.message); }
+    finally{ setBusy(false); }
+  };
+
+  const CHIPS=["What do I do first?","Why was this flagged?","How urgent is it?",
+               "Can this be scripted?","Has this router failed before?"];
+
+  return h("div",{className:"flex flex-col h-[30rem]"},
+    h("div",{className:"flex-1 overflow-auto pr-1 space-y-3"},
+      h("div",{className:"rounded-xl border border-cyan-500/20 bg-cyan-500/[.05] p-3.5"},
+        h("div",{className:"text-[10px] uppercase tracking-wider text-cyan-300 mb-1.5"},
+          "Troubleshooting assistant"),
+        h("div",{className:"text-[12px] text-slate-200 leading-relaxed whitespace-pre-line"},opening)),
+      msgs.map((m,i)=>h("div",{key:m.id||i,
+          className:"rounded-xl p-3 "+(m.role==="user"
+            ? "bg-white/[.05] border border-white/10 ml-8"
+            : "bg-black/30 border border-cyan-500/12 mr-8")},
+        h("div",{className:"flex items-center gap-2 mb-1"},
+          h("span",{className:"text-[10px] uppercase tracking-wider "+
+            (m.role==="user"?"text-slate-400":"text-cyan-300")},
+            m.role==="user"?"You":"Assistant"),
+          m.source&&h("span",{className:"text-[9px] px-1.5 py-0.5 rounded border "+
+            (m.source==="llm"?"text-violet-300 border-violet-500/40 bg-violet-500/10"
+                             :"text-slate-400 border-slate-600/40 bg-slate-600/10")},
+            m.source==="llm"?"language model":"offline engine")),
+        h("div",{className:"text-[12px] text-slate-200 leading-relaxed whitespace-pre-line"},m.content))),
+      busy&&h("div",{className:"text-[11px] text-slate-500 mr-8 px-3"},
+        "Assistant is reading the incident",h("span",{className:"blip"},"…")),
+      h("div",{ref:endRef})),
+    err&&h("div",{className:"mt-2"},h(Err,{msg:err})),
+    msgs.length===0&&h("div",{className:"flex flex-wrap gap-1.5 mt-2"},
+      CHIPS.map(c=>h("button",{key:c,onClick:()=>send(c),disabled:busy,
+        className:"text-[11px] px-2.5 py-1 rounded-lg border border-cyan-500/25 text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40"},c))),
+    h("div",{className:"flex gap-2 mt-3"},
+      h("textarea",{value:q,onChange:e=>setQ(e.target.value),rows:2,
+        placeholder:"Ask about this incident — the fix, the urgency, why it was flagged…",
+        onKeyDown:e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}},
+        className:"flex-1 bg-black/30 rounded-lg px-3 py-2 text-sm border border-cyan-500/20 outline-none focus:border-cyan-500/60 resize-none"}),
+      h(Btn,{onClick:()=>send(),disabled:busy||!q.trim()},busy?"…":"Send")),
+    engine==="llm"
+      ? h("p",{className:"text-[10px] text-slate-600 mt-1.5 leading-relaxed"},
+          "Answers are written by ",asst?.model||"a language model",
+          ", grounded in this incident's stored context — the alarms, the prediction, ",
+          "the drivers and Huawei's documented procedures. It is instructed not to ",
+          "invent steps it cannot support from that.")
+      : h("div",{className:"mt-2 rounded-lg border border-violet-500/25 bg-violet-500/[.06] px-3 py-2"},
+          h("div",{className:"text-[11px] text-violet-100/90 leading-relaxed"},
+            h("strong",null,"Offline engine. "),
+            asst?.detail||"Answers come from the stored incident context, matched by intent."),
+          asst?.last_error&&h("div",{className:"text-[10px] text-rose-300 font-mono mt-1.5 break-all"},
+            asst.last_error)));
+}
+
+function AlertDetail({alertId,defaultView}){
+  const [d,setD]=useState(null),[err,setErr]=useState(null),[busy,setBusy]=useState(false);
+  const [view,setView]=useState(defaultView||"email");
+  useEffect(()=>{
+    if(!alertId){setD(null);return;}
+    let dead=false;setBusy(true);setErr(null);setD(null);setView(defaultView||"email");
+    j(`/alerts/${alertId}`).then(x=>{if(!dead)setD(x);})
+      .catch(e=>{if(!dead)setErr(e.message);}).finally(()=>{if(!dead)setBusy(false);});
+    return()=>{dead=true;};
+  },[alertId,defaultView]);
+  if(busy)return h(Panel,null,h(Loading,{label:"Opening the alert"}));
+  if(err)return h(Panel,null,h(Err,{msg:err}));
+  if(!d)return h(Panel,null,h(Empty,{title:"No alert selected",
+    body:"Pick an alert on the left to read exactly what the on-call team received, and to talk it through with the assistant."}));
+
+  const hw=d.fault_type==="hardware";
+  const STATUS={
+    sent:{t:"text-teal-300",b:"border-teal-500/40 bg-teal-500/10",l:"Delivered by SMTP"},
+    simulated:{t:"text-sky-300",b:"border-sky-500/40 bg-sky-500/10",l:"Recorded, not transmitted"},
+    failed:{t:"text-rose-300",b:"border-rose-500/40 bg-rose-500/10",l:"Delivery failed"},
+  }[d.status]||{t:"text-slate-400",b:"border-slate-600/40 bg-slate-600/10",l:d.status};
+
+  return h("div",{className:"space-y-4"},
+    h(Panel,null,
+      h("div",{className:"flex items-start justify-between gap-3 flex-wrap"},
+        h("div",{className:"min-w-0"},
+          h("div",{className:"flex items-center gap-2 flex-wrap"},
+            h("span",{className:`px-2 py-0.5 rounded text-[10px] font-bold border ${
+              d.kind==="alert"?"text-rose-200 border-rose-500/40 bg-rose-500/15"
+                              :"text-sky-200 border-sky-500/40 bg-sky-500/15"}`},
+              d.kind==="alert"?"ACTION REQUIRED":"NOTIFICATION"),
+            h(Kind,{hw}),
+            h("span",{className:`px-2 py-0.5 rounded text-[10px] border ${STATUS.b} ${STATUS.t}`},STATUS.l)),
+          h("div",{className:"text-[15px] font-semibold text-white mt-2 leading-snug"},d.subject)),
+        h("div",{className:"text-right shrink-0"},
+          h("div",{className:"text-2xl font-bold",style:{color:hw?HW_COLOR:SW_COLOR}},
+            pc(d.fault_probability)),
+          h("div",{className:"text-[10px] text-slate-500"},
+            `threshold ${pc(d.threshold)}`))),
+      h("div",{className:"grid sm:grid-cols-2 gap-x-6 gap-y-1 mt-3 pt-3 border-t border-cyan-500/10 text-[11px]"},
+        [["Router",d.device_id],["Site",d.site||"—"],
+         ["To",d.recipients],["From",d.sender],
+         ["Raised",fmtDateTime(d.created_at)],["Scored at",fmtDateTime(d.scored_at)]].map(([k,v])=>
+          h("div",{key:k,className:"flex justify-between gap-3"},
+            h("span",{className:"text-slate-500"},k),
+            h("span",{className:"text-slate-200 font-mono truncate"},v))))
+      ,d.error&&h("div",{className:"mt-3"},h(Err,{msg:"SMTP error: "+d.error}))),
+
+    h(Panel,{pad:"p-0"},
+      h("div",{className:"flex border-b border-cyan-500/12"},
+        [["email","The email that was sent"],["chat","Troubleshoot with the assistant"]].map(([k,l])=>
+          h("button",{key:k,onClick:()=>setView(k),
+            className:"px-4 py-2.5 text-xs font-medium border-b-2 -mb-px transition-all "+
+              (view===k?"border-cyan-400 text-white":"border-transparent text-slate-500 hover:text-slate-300")},l))),
+      h("div",{className:"p-4"},
+        view==="email"
+          ? h("div",null,
+              h("p",{className:"text-[11px] text-slate-500 mb-2.5 leading-relaxed"},
+                "Rendered exactly as the on-call team receives it, including the documented Huawei fix procedures for the alarms behind the prediction."),
+              h("iframe",{srcDoc:d.body_html||"",title:"alert email",
+                className:"w-full rounded-xl border border-cyan-500/15 bg-white",
+                style:{height:"34rem"}}))
+          : h(Chat,{alertId,opening:d.opening_message}))));
+}
+
+function AlertsTab({health,initialAlertId,initialView}){
+  const [d,setD]=useState(null),[err,setErr]=useState(null),[busy,setBusy]=useState(true);
+  const [sel,setSel]=useState(initialAlertId||null),[filter,setFilter]=useState("");
+  const [test,setTest]=useState(null),[testing,setTesting]=useState(false);
+  const load=useCallback(async()=>{
+    setBusy(true);
+    try{ const x=await j("/alerts?limit=200"); setD(x);
+      setSel(s=>s??(x.alerts[0]?.id||null)); }
+    catch(e){ setErr(e.message); }
+    finally{ setBusy(false); }
+  },[]);
+  useEffect(()=>{load();},[load]);
+  const runTest=async()=>{
+    setTesting(true);setTest(null);
+    try{ setTest(await j("/alerts/test",{method:"POST"})); }
+    catch(e){ setTest({status:"failed",detail:e.message}); }
+    finally{ setTesting(false); }
+  };
+  if(busy&&!d)return h(Loading,{label:"Opening the outbox"});
+  if(err)return h(Err,{msg:err});
+  if(!d)return null;
+
+  const del=d.delivery||{}, asst=d.assistant||{}, st=d.stats||{};
+  const rows=(d.alerts||[]).filter(a=>!filter||a.kind===filter);
+
+  return h("div",{className:"space-y-4"},
+    h("div",{className:"grid grid-cols-2 md:grid-cols-4 gap-3"},
+      h(Kpi,{label:"Alerts raised",value:st.n_alerts||0,tone:"cyan",
+        hint:"Every alert this app has produced. Kept across re-seeding, because the record of what the team was told is about the app's behaviour, not about which log is loaded."}),
+      h(Kpi,{label:"Action required",value:(st.by_kind||{}).alert||0,tone:"rose",sub:"hardware",
+        hint:"Hardware faults. A script cannot fix these, so a human is paged."}),
+      h(Kpi,{label:"Notifications",value:(st.by_kind||{}).notice||0,tone:"cyan",sub:"software",
+        hint:"Software faults. Scripted remediation is attempted automatically; the team is told so they know it is happening."}),
+      h(Kpi,{label:"Delivery",value:del.mode==="live"?"Live":"Simulated",
+        tone:del.mode==="live"?"teal":"sky",
+        sub:del.mode==="live"?del.smtp_host:"no SMTP configured",
+        hint:del.detail})),
+
+    h(Panel,{pad:"p-4"},
+      h("div",{className:"flex items-start justify-between gap-4 flex-wrap"},
+        h("div",{className:"flex-1 min-w-[280px]"},
+          h("div",{className:`text-xs leading-relaxed ${
+            del.mode==="live"?"text-cyan-100/90":"text-violet-100/90"}`},
+            h("strong",null,del.mode==="live"
+              ? "Alerts are being emailed. " : "Alerts are being recorded, not sent. "),
+            del.detail),
+          h("div",{className:"text-[11px] text-slate-400 mt-2"},
+            "Recipients: ",
+            h("code",{className:"text-slate-200"},(del.recipients||[]).join(", ")),
+            h("span",{className:"text-slate-600"}," · "),
+            "one alert per router every ",del.cooldown_minutes," minutes"),
+          h("div",{className:"text-[11px] mt-2 pt-2 border-t border-cyan-500/10 "+
+              (asst.engine==="llm"?"text-slate-400":"text-violet-200/80")},
+            h("strong",null,"Assistant: "),
+            asst.engine==="llm"?`answers written by ${asst.model}. `:"offline engine. ",
+            asst.detail,
+            asst.last_error&&h("span",{className:"block font-mono text-rose-300 mt-1 break-all"},
+              asst.last_error))),
+        h(Btn,{size:"sm",variant:"ghost",onClick:runTest,disabled:testing},
+          testing?"Sending…":"Send a test email")),
+      test&&h("div",{className:"mt-3"},
+        test.status==="sent"
+          ? h("div",{className:"rounded-xl border border-teal-500/35 bg-teal-500/[.07] p-3"},
+              h("div",{className:"text-sm text-teal-100"},"Test message delivered."),
+              h("div",{className:"text-[11px] text-slate-300 mt-1"},test.detail))
+          : test.status==="simulated"
+            ? h(Note,{tone:"violet"},h("strong",null,"Nothing was transmitted. "),test.detail)
+            : h("div",{className:"rounded-xl border border-rose-500/40 bg-rose-500/[.07] p-3"},
+                h("div",{className:"text-sm text-rose-100"},"The mail server rejected it."),
+                h("div",{className:"text-[11px] text-slate-300 mt-1 font-mono break-all"},
+                  test.error||test.detail),
+                h("div",{className:"text-[11px] text-slate-400 mt-2 leading-relaxed"},
+                  "If this mentions ",h("code",null,"Username and Password not accepted"),
+                  ", the account password was used instead of a Google App Password. ",
+                  "Gmail stopped accepting account passwords in May 2025 — enable ",
+                  "2-Step Verification, generate an App Password for Mail, and put those ",
+                  "16 characters in ",h("code",null,"backend/.env"),".")))),
+
+    h("div",{className:"grid lg:grid-cols-[22rem_1fr] gap-4 items-start"},
+      h(Panel,{title:"Outbox",
+        subtitle:`${rows.length} of ${st.n_alerts||0} shown`,
+        right:h(Btn,{size:"sm",variant:"ghost",onClick:load},"Refresh")},
+        h("div",{className:"flex gap-1 mb-3"},
+          [["","All"],["alert","Action"],["notice","Notices"]].map(([k,l])=>
+            h("button",{key:k||"all",onClick:()=>setFilter(k),
+              className:`px-2.5 py-1 text-[11px] rounded-lg border ${
+                filter===k?"border-cyan-400/50 bg-cyan-500/15 text-cyan-200"
+                          :"border-cyan-500/15 text-slate-400 hover:text-slate-200"}`},l))),
+        rows.length===0
+          ? h("p",{className:"text-[12px] text-slate-500 py-6 text-center leading-relaxed"},
+              "No alerts yet. Open the Fleet tab — any router above the alert threshold raises one automatically.")
+          : h("div",{className:"space-y-1.5 max-h-[36rem] overflow-auto pr-1"},
+              rows.map(a=>h("button",{key:a.id,onClick:()=>setSel(a.id),
+                className:`w-full text-left rounded-xl border px-3 py-2.5 transition-colors ${
+                  sel===a.id?"border-cyan-400/50 bg-cyan-500/10"
+                            :"border-cyan-500/12 bg-black/25 hover:bg-cyan-500/[.05]"}`},
+                h("div",{className:"flex items-center gap-2"},
+                  h("span",{className:"w-1.5 h-1.5 rounded-full shrink-0",
+                    style:{background:a.kind==="alert"?BAND.critical.c:SW_COLOR}}),
+                  h("span",{className:"font-mono text-[12px] text-white"},a.device_id),
+                  h("span",{className:"text-[11px] font-mono ml-auto",
+                    style:{color:a.kind==="alert"?BAND.critical.c:SW_COLOR}},pc(a.fault_probability))),
+                h("div",{className:"text-[10px] text-slate-500 mt-1 flex items-center gap-1.5 flex-wrap"},
+                  h("span",null,fmtDateTime(a.created_at)),
+                  h("span",{className:"text-slate-700"},"·"),
+                  h("span",null,a.site||"—"),
+                  a.n_messages>0&&h("span",{className:"text-cyan-400"},
+                    `· ${a.n_messages} message${a.n_messages===1?"":"s"}`)))))),
+      h(AlertDetail,{alertId:sel,
+        defaultView:(sel===initialAlertId&&initialView==="chat")?"chat":"email"})));
+}
+
+// ------------------------------------------------- comparison context
+function CompareContext({c}){
+  if(!c)return null;
+  const A=c.a,B=c.b;
+  const explained=(c.factors||[]).filter(f=>f.explains);
+
+  // Two sites on a small map. Same site collapses to a single marker.
+  const map=(function(){
+    const pts=[A,B].filter(p=>p.lat!=null&&p.lon!=null);
+    if(pts.length<2)return null;
+    const W=560,H=190,P=42;
+    const las=pts.map(p=>p.lat),los=pts.map(p=>p.lon);
+    const la0=Math.min(...las),la1=Math.max(...las),lo0=Math.min(...los),lo1=Math.max(...los);
+    const X=lo=>(lo1-lo0)<1e-9?W/2:P+((lo-lo0)/(lo1-lo0))*(W-2*P);
+    const Y=la=>(la1-la0)<1e-9?H/2:H-P-((la-la0)/(la1-la0))*(H-2*P);
+    const ax=X(A.lon),ay=Y(A.lat),bx=X(B.lon),by=Y(B.lat);
+    const dot=(p,x,y,col)=>h("g",{key:p.device_id,transform:`translate(${x},${y})`},
+      h("circle",{r:16,fill:col,fillOpacity:.12}),
+      h("circle",{r:6,fill:col,fillOpacity:.35,stroke:col,strokeWidth:2}),
+      h("text",{y:-14,textAnchor:"middle",style:{fontSize:10,fill:"#e2e8f0",fontWeight:600}},p.device_id),
+      h("text",{y:24,textAnchor:"middle",style:{fontSize:9.5,fill:"#94a3b8"}},p.site||"unknown"),
+      p.site_pressure&&p.site_pressure.known_stressed&&h("text",{y:36,textAnchor:"middle",
+        style:{fontSize:8.5,fill:BAND.elevated.c}},"known problem site"));
+    return h("svg",{viewBox:`0 0 ${W} ${H}`,className:"w-full"},
+      c.same_site
+        ? null
+        : h("g",null,
+            h("line",{x1:ax,y1:ay,x2:bx,y2:by,stroke:"#1e3a5f",strokeWidth:1.4,strokeDasharray:"5 4"}),
+            c.distance_km!=null&&h("text",{x:(ax+bx)/2,y:(ay+by)/2-7,textAnchor:"middle",
+              style:{fontSize:10,fill:"#7c93ad"}},`${c.distance_km} km apart`)),
+      dot(A,ax,ay,"#f43f5e"),dot(B,bx,by,"#2dd4bf"));
+  })();
+
+  const statRow=(label,va,vb,hint)=>h("tr",{key:label,className:"border-t border-cyan-500/[.07]"},
+    h("td",{className:"py-1.5 pr-3 text-slate-400 text-[11px]"},label,
+      hint&&h("div",{className:"text-[9.5px] text-slate-600"},hint)),
+    h("td",{className:"py-1.5 px-2 text-right font-mono text-[11px] text-rose-200"},va),
+    h("td",{className:"py-1.5 pl-2 text-right font-mono text-[11px] text-teal-200"},vb));
+
+  return h("div",{className:"space-y-4"},
+    h(Panel,{title:"What else is different about these two routers",
+      subtitle:"The score says which one is riskier. This says why it might be — location, physical environment, hardware vintage, position in the topology and track record. Anything marked as explaining the gap is a candidate cause worth checking before you touch the device."},
+      explained.length===0
+        ? h(Note,{tone:"violet"},
+            h("strong",null,"None of these dimensions explains the gap. "),
+            "Same site or comparable sites, similar environment, similar record. That points back at what the two routers are doing right now — compare their alarm patterns in the Inspector.")
+        : h(Note,null,
+            h("strong",null,`${explained.length} candidate cause${explained.length===1?"":"s"} found: `),
+            explained.map(f=>f.dimension.toLowerCase()).join(", "),"."),
+      map&&h("div",{className:"mt-4 rounded-xl bg-[#050d18] grid-bg overflow-hidden"},map),
+      h("div",{className:"mt-4 space-y-2.5"},
+        (c.factors||[]).map((f,i)=>h("div",{key:i,
+            className:"rounded-xl border px-3.5 py-3 "+(f.explains
+              ? "border-purple-500/30 bg-purple-500/[.06]"
+              : "border-cyan-500/12 bg-black/25")},
+          h("div",{className:"flex items-center gap-2 flex-wrap"},
+            h("span",{className:"text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border "+
+              (f.explains?"text-purple-200 border-purple-500/40 bg-purple-500/15"
+                         :"text-slate-500 border-slate-600/40")},
+              f.explains?"candidate cause":"ruled out"),
+            h("span",{className:"text-[11px] uppercase tracking-wider text-slate-500"},f.dimension)),
+          h("div",{className:"text-[12.5px] text-white font-medium mt-1.5"},f.headline),
+          h("p",{className:"text-[11.5px] text-slate-400 mt-1 leading-relaxed"},f.detail))))),
+
+    h(Panel,{title:"Side by side"},
+      h("table",{className:"w-full"},
+        h("thead",null,h("tr",null,
+          h("th",{className:"text-left text-[10px] uppercase tracking-wider text-slate-500 pb-1"},""),
+          h("th",{className:"text-right text-[11px] font-mono text-rose-200 pb-1"},A.device_id),
+          h("th",{className:"text-right text-[11px] font-mono text-teal-200 pb-1"},B.device_id))),
+        h("tbody",null,
+          statRow("Site",A.site||"—",B.site||"—"),
+          statRow("Model",A.model||"—",B.model||"—"),
+          statRow("Role",A.device_role||"—",B.device_role||"—"),
+          statRow("Days of history",A.in_service_days??"—",B.in_service_days??"—",
+                  "from first alarm seen"),
+          statRow("Environmental / 30d",A.environmental_per_30d??"—",B.environmental_per_30d??"—",
+                  "temperature, fans, power"),
+          statRow("Equipment / 30d",A.equipment_per_30d??"—",B.equipment_per_30d??"—",
+                  "boards, optics, physical parts"),
+          statRow("Total alarms",A.n_alarms??"—",B.n_alarms??"—"),
+          statRow("Fault episodes",A.n_faults??"—",B.n_faults??"—"),
+          statRow("Upstream parent",A.parent_id||"none (core)",B.parent_id||"none (core)"),
+          statRow("Downstream devices",A.n_downstream??"—",B.n_downstream??"—"),
+          statRow("Routers at risk on site",
+                  `${A.site_pressure?.n_at_risk??"—"} / ${A.site_pressure?.n_routers??"—"}`,
+                  `${B.site_pressure?.n_at_risk??"—"} / ${B.site_pressure?.n_routers??"—"}`,
+                  "a whole site in trouble is a different work order")))));
+}
+
+// ---------------------------------------------------------------- APP
+// Every alert email links back to its own conversation, as
+// /?alert=<id>&view=chat. Reading it here is what makes that link land on the
+// right incident with the assistant already open, rather than on the home page.
+function deepLink(){
+  try{
+    const p=new URLSearchParams(window.location.search||"");
+    const id=parseInt(p.get("alert"),10);
+    return {alertId:Number.isFinite(id)?id:null,view:p.get("view")||null};
+  }catch{ return {alertId:null,view:null}; }
+}
+
+function App(){
+  const link=useMemo(deepLink,[]);
+  const [tab,setTab]=useState(link.alertId?"alerts":"overview");
+  const [health,setHealth]=useState(null),[topo,setTopo]=useState(null),[fleet,setFleet]=useState(null);
+  const [routers,setRouters]=useState([]),[selected,setSelected]=useState("");
+  const [moments,setMoments]=useState([]);
+  const [loading,setLoading]=useState(true),[metrics,setMetrics]=useState(null);
+
+  const refreshHealth=useCallback(async()=>{
+    try{const hh=await j("/health");setHealth(hh);return hh;}
+    catch{setHealth({status:"unreachable",models_loaded:false,data_loaded:false});return null;}
+  },[]);
+  // Data loads regardless of model state — only the risk numbers need the model.
+  const loadAll=useCallback(async()=>{
+    setLoading(true);
+    try{
+      const t=await j("/topology"); setTopo(t);
+      setRouters((await j("/devices?routers_only=true")).devices||[]);
+      try{ setFleet(await j("/fleet")); }catch{ setFleet(null); }
+      try{ setMoments((await j("/moments?limit=8")).moments||[]); }catch{ setMoments([]); }
+    }catch(e){ setTopo(null); setFleet(null); setRouters([]); setMoments([]); }
+    finally{ setLoading(false); }
+  },[]);
+  useEffect(()=>{(async()=>{
+    const hh=await refreshHealth();
+    j("/metrics").then(setMetrics).catch(()=>{});
+    if(hh?.data_loaded) await loadAll(); else setLoading(false);
+  })();},[]);
+
+  const open=id=>{setSelected(id);setTab("router");};
+  const modelsLoaded=!!health?.models_loaded;
+  const TABS=[["overview","Overview"],["fleet","Fleet"],["router","Inspector"],
+              ["compare","Comparison"],["alerts","Alerts"],["data","Data"]];
+
+  const noData=health&&!health.data_loaded;
+  return h("div",{className:"min-h-screen"},
+    h("header",{className:"sticky top-0 z-30 border-b border-cyan-500/15 bg-[#050c17]/85 backdrop-blur-xl"},
+      h("div",{className:"max-w-[1500px] mx-auto px-6 py-3 flex items-center justify-between gap-4 flex-wrap"},
+        h("div",{className:"flex items-center gap-3"},
+          h(Logo,{size:40}),
+          h("div",null,
+            h("h1",{className:"text-[17px] font-bold text-white tracking-tight leading-tight"},
+              "Router",h("span",{className:"text-cyan-400"},"Guardian")),
+            h("p",{className:"text-[10px] text-slate-500 tracking-wide uppercase"},"Network Operations Intelligence"))),
+        h("div",{className:"flex items-center gap-4 text-[11px]"},
+          h("div",{className:"flex items-center gap-1.5"},
+            h("span",{className:`w-1.5 h-1.5 rounded-full ${modelsLoaded?"bg-teal-400":"bg-rose-400"} ${modelsLoaded?"blip":""}`}),
+            h("span",{className:"text-slate-400"},modelsLoaded?"model online":"model offline")),
+          health?.horizon_hours&&h("div",{className:"text-slate-500 hidden lg:block",
+              title:"The model reads the last 24 hours of alarms and predicts whether a fault will occur in the following 12 hours. This is fixed by how the model was trained."},
+            h("span",{className:"font-mono text-slate-400"},
+              `${health.lookback_hours}h → ${health.horizon_hours}h`)," horizon"),
+          health?.n_devices>0&&h("div",{className:"flex items-center gap-1.5 text-slate-500"},
+            h("span",{className:"w-1.5 h-1.5 rounded-full bg-cyan-400 blip"}),
+            h("span",null,health.n_routers," routers · ",health.n_devices," devices")),
+          health?.reference_time&&h("div",{className:"text-slate-600 hidden md:block"},
+            "as of ",h("span",{className:"text-slate-400 font-mono"},health.reference_time.slice(0,10)))))),
+    h("nav",{className:"max-w-[1500px] mx-auto px-6 pt-5"},
+      h("div",{className:"flex gap-1 border-b border-cyan-500/12 flex-wrap"},
+        TABS.map(([k,l])=>h("button",{key:k,onClick:()=>setTab(k),
+          className:"px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-all flex items-center gap-2 "+
+            (tab===k?"border-cyan-400 text-white":"border-transparent text-slate-500 hover:text-slate-300")},
+          l,
+          k==="alerts"&&health?.n_alerts>0&&h("span",{
+            className:"text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/35"},
+            health.n_alerts))))),
+    h("main",{className:"max-w-[1500px] mx-auto px-6 py-6 space-y-5"},
+      noData&&tab!=="data"&&h(Panel,null,h(Empty,{title:"No network loaded",
+        body:"Import your alarm-log CSV, or generate a demo network to explore the app right away.",
+        action:h(Btn,{onClick:()=>setTab("data")},"Go to Data")})),
+      (!noData||tab==="data")&&h(React.Fragment,null,
+        tab==="overview"&&h(Overview,{topo,fleet,loading,onSelect:open,reload:loadAll,modelsLoaded}),
+        tab==="fleet"&&h(FleetTab,{fleet,moments,loading,onSelect:open,reload:loadAll,modelsLoaded}),
+        tab==="router"&&h(RouterTab,{devices:routers,selected,setSelected}),
+        tab==="compare"&&h(CompareTab,{devices:routers}),
+        tab==="alerts"&&h(AlertsTab,{health,
+          initialAlertId:link.alertId,initialView:link.view}),
+        tab==="data"&&h(DataTab,{health,onSeeded:async()=>{await refreshHealth();await loadAll();}}))),
+    h("footer",{className:"max-w-[1500px] mx-auto px-6 py-7 mt-4 border-t border-cyan-500/10"},
+      h("p",{className:"text-[11px] text-slate-600 leading-relaxed"},
+        metrics?.display?.summary||"Stage 1 ROC-AUC 0.940 · PR-AUC 0.75 · 85% recall at 70% precision. Trained on synthetic logs built from 1,973 real Huawei alarm definitions.")));
+}
+createRoot(document.getElementById("root")).render(h(App));
+</script>
+</body>
+</html>
